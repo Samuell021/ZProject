@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.graphify/
+graphify-out/
+
+test-results/
+playwright-report/

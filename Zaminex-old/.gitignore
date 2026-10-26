@@ -1,0 +1,14 @@
+.env
+.env*
+__pycache__/
+*.pyc
+*.sqlite3
+ZaminexF/node_modules/
+ZaminexF/dist/
+
+.venv/
+__venv__/
+
+ZaminexB/media/
+
+ZaminexB/staticfiles/

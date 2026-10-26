@@ -1,0 +1,1624 @@
+import React, { useEffect, useMemo, useState } from "react";
+import {
+  AlertTriangle,
+  Check,
+  CheckCircle2,
+  FolderSearch,
+  Lock,
+  Plus,
+  RotateCcw,
+  Trash2,
+} from "lucide-react";
+import { Badge } from "../../../shared/components/ui/Badge";
+import { EmptyState } from "../../../shared/components/ui/EmptyState";
+import { useLocationTree } from "../../../shared/components/ui/LocationSelect";
+import type { Role } from "../../../shared/lib/types";
+import { AccessibleModal } from "../components/AccessibleModal";
+import { Btn, Card, Field, SearchBar, Shell, inputCls } from "../components/CrmUIKit";
+import { patch, post } from "../lib/crmApi";
+import { useLoad } from "../lib/useCrmLoad";
+import {
+  LEAD_SOURCE_OPTIONS,
+  STAGE_LABELS_FA,
+  WIZARD_STEPS,
+  clearSupplyDraft,
+  computeStallInfo,
+  deriveWizardStage,
+  emitSupplyCountersRefresh,
+  formatFaAmount,
+  formatFaInt,
+  normalizePersianSearch,
+  previewDealTypeChange,
+  readSupplyDraft,
+  stageGuidanceForRole,
+  supplyStatusBadgeMeta,
+  wizardStepIndex,
+  writeSupplyDraft,
+  type DealTermsSchema,
+  type DealTypeCatalogItem,
+  type DealTypeChangePreview,
+  type PropertyCaseRecord,
+  type PropertyPartyRow,
+  type WizardStepKey,
+} from "../lib/supplyDomain";
+import type { CrmPageProps, Row } from "../types";
+
+type AppraisalDraftState = {
+  contactMode: "new" | "existing";
+  existingContactId: string;
+  contactFullName: string;
+  contactPhone: string;
+  leadSource: string;
+  leadSummary: string;
+  desiredDealTypes: number[];
+  propertyTitle: string;
+  districtId: string;
+  neighborhood: string;
+  address: string;
+  propertyType: string;
+  area: string;
+  rooms: string;
+  floor: string;
+  builtYear: string;
+  reportText: string;
+  visitNotes: string;
+  documentStatus: string;
+  isComplete: boolean;
+  parties: PropertyPartyRow[];
+};
+
+const EMPTY_DRAFT: AppraisalDraftState = {
+  contactMode: "new",
+  existingContactId: "",
+  contactFullName: "",
+  contactPhone: "",
+  leadSource: "DIRECT_CALL",
+  leadSummary: "",
+  desiredDealTypes: [],
+  propertyTitle: "",
+  districtId: "",
+  neighborhood: "",
+  address: "",
+  propertyType: "APARTMENT",
+  area: "",
+  rooms: "",
+  floor: "",
+  builtYear: "",
+  reportText: "",
+  visitNotes: "",
+  documentStatus: "تک‌برگ",
+  isComplete: true,
+  parties: [{ fullName: "", phone: "", role: "OWNER", sharePercent: "100", isPrimary: true }],
+};
+
+type LocationProvince = {
+  id: number;
+  displayName: string;
+  cities?: Array<{
+    id: number;
+    displayName: string;
+    districts?: Array<{ id: number; displayName: string }>;
+  }>;
+};
+
+type ExistingListingSummary = {
+  id: number;
+  title: string;
+  status: string;
+  deal_type: number | null;
+  dealType?: number | null;
+  dealTypeDisplay?: string;
+  sale_price?: string | number | null;
+  salePrice?: string | number | null;
+  deposit?: string | number | null;
+  monthly_rent?: string | number | null;
+  monthlyRent?: string | number | null;
+  terms?: Record<string, string | number | boolean>;
+  version?: number;
+};
+
+function readInitialWizardUrlParams() {
+  if (typeof window === "undefined") {
+    return { caseId: "", chooseCase: false, reviewRequestId: "" };
+  }
+  const params = new URLSearchParams(window.location.search);
+  return {
+    caseId: params.get("id") || params.get("case") || params.get("reviewRequest") || "",
+    chooseCase: params.get("chooseCase") === "1",
+    reviewRequestId: params.get("reviewRequest") || "",
+  };
+}
+
+function syncWizardUrlParams(caseId: string | number | null, opts?: { chooseCase?: boolean; reviewRequest?: string | number | null }) {
+  if (typeof window === "undefined") return;
+  const params = new URLSearchParams();
+  if (caseId) params.set("id", String(caseId));
+  if (opts?.chooseCase) params.set("chooseCase", "1");
+  if (opts?.reviewRequest) params.set("reviewRequest", String(opts.reviewRequest));
+  const suffix = params.toString();
+  window.history.replaceState({}, "", `/app/property-register/${suffix ? `?${suffix}` : ""}`);
+}
+
+export function PropertyRegisterPage({
+  csrfToken,
+  role,
+  currentUserId,
+  recordId,
+  navigate,
+  embedded,
+}: CrmPageProps) {
+  const typedRole = (role || "consultant") as Role;
+  const isManager = typedRole === "admin" || typedRole === "range_manager";
+  const userKey = `${typedRole}:${currentUserId || "self"}`;
+
+  const urlInit = useMemo(() => readInitialWizardUrlParams(), []);
+  const [selectedCaseId, setSelectedCaseId] = useState<string>(recordId || urlInit.caseId || "");
+  const [pickerOpen, setPickerOpen] = useState<boolean>(urlInit.chooseCase);
+  const [pickerSearch, setPickerSearch] = useState("");
+  const [reviewSummaryOpen, setReviewSummaryOpen] = useState<boolean>(Boolean(urlInit.reviewRequestId));
+  const [submittedReviewVersion, setSubmittedReviewVersion] = useState<number | null>(null);
+
+  const [viewedStepOverride, setViewedStepOverride] = useState<WizardStepKey | null>(null);
+  const [draft, setDraft] = useState<AppraisalDraftState>(EMPTY_DRAFT);
+  const [restoredDraftAt, setRestoredDraftAt] = useState<string>("");
+
+  const [assigneeId, setAssigneeId] = useState("");
+  const [dueAt, setDueAt] = useState("");
+  const [rejectReason, setRejectReason] = useState("");
+  const [reviewDecision, setReviewDecision] = useState<"APPROVED" | "CHANGES_REQUIRED">("APPROVED");
+  const [reviewReason, setReviewReason] = useState("");
+
+  const [selectedDealTypeId, setSelectedDealTypeId] = useState<string>("");
+  const [pendingDealTypeId, setPendingDealTypeId] = useState<string>("");
+  const [dealTypePreview, setDealTypePreview] = useState<DealTypeChangePreview | null>(null);
+  const [listingTerms, setListingTerms] = useState<Record<string, string | number | boolean>>({});
+  const [listingStatus, setListingStatus] = useState<"DRAFT" | "ACTIVE" | "PAUSED">("ACTIVE");
+  const [listingDescription, setListingDescription] = useState("");
+
+  const [busy, setBusy] = useState(false);
+  const [feedback, setFeedback] = useState("");
+  const [formError, setFormError] = useState("");
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+
+  const { tree: locationTree } = useLocationTree(csrfToken);
+  const districtOptions = useMemo(() => {
+    const out: Array<{ id: number; label: string }> = [];
+    for (const prov of (locationTree || []) as LocationProvince[]) {
+      for (const city of prov.cities || []) {
+        for (const dist of city.districts || []) {
+          out.push({ id: dist.id, label: `${dist.displayName} (${city.displayName})` });
+        }
+      }
+    }
+    return out;
+  }, [locationTree]);
+
+  useEffect(() => {
+    if (recordId && recordId !== selectedCaseId) {
+      setSelectedCaseId(recordId);
+    }
+  }, [recordId]);
+
+  const caseDetailUrl = selectedCaseId ? `/crm/api/property-cases/${selectedCaseId}/` : "";
+  const baseUrls = [
+    "/crm/api/property-cases/",
+    "/crm/api/contacts/",
+    "/crm/api/scope-memberships/",
+    "/crm/api/deal-types/",
+    ...(caseDetailUrl ? [caseDetailUrl] : []),
+  ];
+  const { data, error, loading, reload } = useLoad(baseUrls, csrfToken, [selectedCaseId]);
+
+  const activeCase = caseDetailUrl ? ((data[caseDetailUrl] || null) as PropertyCaseRecord | null) : null;
+  const allCases = (data["/crm/api/property-cases/"] || []) as PropertyCaseRecord[];
+  const contacts = (data["/crm/api/contacts/"] || []) as Row[];
+  const memberships = (data["/crm/api/scope-memberships/"] || []) as Row[];
+  const dealTypes = ((data["/crm/api/deal-types/"] || []) as DealTypeCatalogItem[]).filter(
+    (dt) => dt.is_active && dt.published_version,
+  );
+
+  const propId = activeCase?.resulting_property ?? null;
+  const propDetailUrl = propId ? `/properties/api/properties/${propId}/` : "";
+  const propListingsUrl = propId ? `/crm/api/properties/${propId}/listings/` : "";
+  const propLoad = useLoad(
+    propId ? [propDetailUrl, propListingsUrl] : [],
+    csrfToken,
+    [propId, activeCase?.version],
+  );
+  const loadedProperty = propId ? (propLoad.data[propDetailUrl] as Row | undefined) : undefined;
+  const propertyListings = (propId ? propLoad.data[propListingsUrl] || [] : []) as ExistingListingSummary[];
+
+  const serverStep = deriveWizardStage(activeCase);
+  const currentStep = viewedStepOverride || serverStep;
+  const serverIndex = wizardStepIndex(serverStep);
+  const currentIndex = wizardStepIndex(currentStep);
+  const isViewingPast = currentIndex < serverIndex;
+  const isViewingFuture = currentIndex > serverIndex;
+  const guidance = stageGuidanceForRole(activeCase, typedRole, currentUserId);
+
+  useEffect(() => {
+    setViewedStepOverride(null);
+  }, [serverStep, selectedCaseId]);
+
+  useEffect(() => {
+    const saved = readSupplyDraft<AppraisalDraftState>(userKey, selectedCaseId || null);
+    if (saved) {
+      setDraft({ ...EMPTY_DRAFT, ...saved.fields });
+      setRestoredDraftAt(saved.savedAt);
+      return;
+    }
+    setRestoredDraftAt("");
+    if (activeCase) {
+      const propParties = Array.isArray(loadedProperty?.parties) && loadedProperty.parties.length
+        ? (loadedProperty.parties as PropertyPartyRow[])
+        : [
+            {
+              fullName: activeCase.contact_name || "",
+              phone: activeCase.contact_phones?.[0] || "",
+              role: "OWNER" as const,
+              sharePercent: "100",
+              isPrimary: true,
+            },
+          ];
+      setDraft({
+        ...EMPTY_DRAFT,
+        propertyTitle: activeCase.property_title || "",
+        districtId: loadedProperty?.districtId ? String(loadedProperty.districtId) : "",
+        neighborhood: String(loadedProperty?.neighborhood || ""),
+        address: String(loadedProperty?.address || loadedProperty?.fullAddress || ""),
+        propertyType: String(loadedProperty?.type || "APARTMENT"),
+        area: loadedProperty?.area ? String(loadedProperty.area) : "",
+        rooms: loadedProperty?.beds != null ? String(loadedProperty.beds) : "",
+        floor: loadedProperty?.floor != null ? String(loadedProperty.floor) : "",
+        builtYear: loadedProperty?.constructionYear ? String(loadedProperty.constructionYear) : "",
+        reportText: activeCase.appraisal?.report_text || "",
+        visitNotes: activeCase.appraisal?.visit_notes || "",
+        documentStatus: String(activeCase.appraisal?.findings?.document_status || "تک‌برگ"),
+        isComplete: activeCase.appraisal?.is_complete ?? true,
+        parties: propParties,
+      });
+    } else {
+      setDraft(EMPTY_DRAFT);
+    }
+  }, [userKey, selectedCaseId, activeCase?.id, loadedProperty?.id]);
+
+  function updateDraft<K extends keyof AppraisalDraftState>(key: K, value: AppraisalDraftState[K]) {
+    setDraft((prev) => {
+      const next = { ...prev, [key]: value };
+      writeSupplyDraft(
+        userKey,
+        selectedCaseId || null,
+        next as unknown as Record<string, unknown>,
+        activeCase?.version ?? null,
+      );
+      return next;
+    });
+    if (fieldErrors[key]) {
+      setFieldErrors((prev) => {
+        const copy = { ...prev };
+        delete copy[key];
+        return copy;
+      });
+    }
+  }
+
+  const currentDealType = useMemo(
+    () => dealTypes.find((d) => String(d.id) === String(selectedDealTypeId)) || null,
+    [dealTypes, selectedDealTypeId],
+  );
+  const currentSchema: DealTermsSchema | null = currentDealType?.published_version?.terms_schema || null;
+
+  function handleDealTypeSelect(nextId: string) {
+    if (!selectedDealTypeId || !nextId || nextId === selectedDealTypeId) {
+      setSelectedDealTypeId(nextId);
+      setDealTypePreview(null);
+      return;
+    }
+    const nextDeal = dealTypes.find((d) => String(d.id) === String(nextId));
+    const preview = previewDealTypeChange(
+      currentSchema,
+      nextDeal?.published_version?.terms_schema || null,
+      listingTerms,
+    );
+    if (preview.incompatibleFields.length > 0) {
+      setPendingDealTypeId(nextId);
+      setDealTypePreview(preview);
+      return;
+    }
+    setSelectedDealTypeId(nextId);
+    setListingTerms(preview.preservedTerms);
+    setDealTypePreview(null);
+  }
+
+  function confirmDealTypeSwitch() {
+    if (!pendingDealTypeId || !dealTypePreview) return;
+    setSelectedDealTypeId(pendingDealTypeId);
+    setListingTerms(dealTypePreview.preservedTerms);
+    setPendingDealTypeId("");
+    setDealTypePreview(null);
+  }
+
+  const pickerFilteredCases = useMemo(() => {
+    const q = normalizePersianSearch(pickerSearch);
+    if (!q) return allCases;
+    return allCases.filter((item) =>
+      normalizePersianSearch(
+        `${item.code} ${item.contact_name || ""} ${item.property_title || ""} ${item.description || ""} ${item.scope_name || ""}`,
+      ).includes(q),
+    );
+  }, [allCases, pickerSearch]);
+
+  const selectableStaff = useMemo(() => {
+    const activeRows = memberships.filter((m) => !m.ended_at);
+    const inScope = activeCase
+      ? activeRows.filter((m) => Number(m.scope) === Number(activeCase.scope))
+      : activeRows;
+    const pool = inScope.length ? inScope : activeRows;
+    const seen = new Set<string>();
+    return pool.filter((m) => {
+      const uid = String(m.user ?? m.id);
+      if (seen.has(uid)) return false;
+      seen.add(uid);
+      return true;
+    });
+  }, [memberships, activeCase]);
+
+  async function handleCreateLead(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setFormError("");
+    setFeedback("");
+    const errs: Record<string, string> = {};
+    if (draft.contactMode === "existing") {
+      if (!draft.existingContactId) errs.existingContactId = "یک شخص موجود از فهرست انتخاب کنید.";
+    } else {
+      if (!draft.contactFullName.trim()) errs.contactFullName = "نام کامل مالک یا متقاضی ثبت الزامی است.";
+      if (!draft.contactPhone.trim()) errs.contactPhone = "ثبت حداقل یک شماره تماس معتبر الزامی است.";
+    }
+    if (!draft.leadSummary.trim()) errs.leadSummary = "خلاصهٔ اولیهٔ ملک را وارد کنید.";
+    if (Object.keys(errs).length > 0) {
+      setFieldErrors(errs);
+      return;
+    }
+
+    setBusy(true);
+    try {
+      const payload: Row = {
+        lead_source: draft.leadSource,
+        description: draft.leadSummary.trim(),
+        desired_deal_type_ids: draft.desiredDealTypes,
+      };
+      if (draft.contactMode === "existing") {
+        payload.contact = Number(draft.existingContactId);
+      } else {
+        payload.contact_full_name = draft.contactFullName.trim();
+        payload.contact_phone = draft.contactPhone.trim();
+      }
+      const created = (await post(csrfToken, "/crm/api/property-cases/", payload)) as PropertyCaseRecord;
+      clearSupplyDraft(userKey, null);
+      setSelectedCaseId(String(created.id));
+      syncWizardUrlParams(created.id);
+      emitSupplyCountersRefresh();
+      setFeedback(`پرونده ${created.code} ایجاد شد و به مرحلهٔ «${STAGE_LABELS_FA[created.stage]}» وارد گردید.`);
+      reload();
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : "ثبت اولیهٔ پرونده ناموفق بود.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleSaveAppraisal(submitAfterSave: boolean) {
+    if (!activeCase) return;
+    setFormError("");
+    setFeedback("");
+    const errs: Record<string, string> = {};
+    if (submitAfterSave) {
+      if (!draft.address.trim()) errs.address = "نشانی دقیق ملک الزامی است.";
+      if (!draft.districtId) errs.districtId = "انتخاب منطقه الزامی است.";
+      if (!draft.area || Number(draft.area) <= 0) errs.area = "متراژ ملک باید عددی بزرگ‌تر از صفر باشد.";
+      if (!draft.reportText.trim()) errs.reportText = "متن گزارش کارشناسی الزامی است.";
+    }
+    if (Object.keys(errs).length > 0) {
+      setFieldErrors(errs);
+      return;
+    }
+
+    setBusy(true);
+    try {
+      const validParties = draft.parties
+        .filter((p) => p.fullName.trim())
+        .map((p) => ({
+          full_name: p.fullName.trim(),
+          phone: p.phone.trim(),
+          role: p.role,
+          share_percent: p.sharePercent ? Number(p.sharePercent) : null,
+          is_primary: Boolean(p.isPrimary),
+        }));
+      const workspaceBody: Row = {
+        address: draft.address.trim(),
+        neighborhood: draft.neighborhood.trim(),
+        district: draft.districtId ? Number(draft.districtId) : null,
+        property_type: draft.propertyType,
+        area: draft.area ? Number(draft.area) : 0,
+        rooms: draft.rooms ? Number(draft.rooms) : 0,
+        floor: draft.floor ? Number(draft.floor) : null,
+        built_year: draft.builtYear ? Number(draft.builtYear) : null,
+        report_text: draft.reportText.trim(),
+        visit_notes: draft.visitNotes.trim(),
+        findings: { document_status: draft.documentStatus },
+        is_complete: submitAfterSave ? true : draft.isComplete,
+        parties: validParties,
+        version: activeCase.version,
+      };
+      if (isManager && draft.propertyTitle.trim()) {
+        workspaceBody.property_title = draft.propertyTitle.trim();
+      }
+      const saved = (await post(
+        csrfToken,
+        `/crm/api/property-cases/${activeCase.id}/save_workspace/`,
+        workspaceBody,
+      )) as PropertyCaseRecord;
+
+      if (submitAfterSave) {
+        const reviewResp = (await post(
+          csrfToken,
+          `/crm/api/property-cases/${activeCase.id}/submit_property_for_review/`,
+          { version: saved.version },
+        )) as { version?: number };
+        clearSupplyDraft(userKey, activeCase.id);
+        setSubmittedReviewVersion(reviewResp.version ?? null);
+        setReviewSummaryOpen(true);
+        syncWizardUrlParams(activeCase.id, { reviewRequest: activeCase.id });
+        emitSupplyCountersRefresh();
+        setFeedback("گزارش کارشناسی با موفقیت برای بررسی و تأیید مدیر رنج ارسال شد.");
+      } else {
+        setFeedback("اطلاعات ملک و گزارش کارشناسی ذخیره شد (بدون ایجاد فایل عرضه).");
+      }
+      reload();
+      propLoad.reload();
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : "ذخیرهٔ اطلاعات کارشناسی ناموفق بود.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleSaveListing(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!propId || !selectedDealTypeId) {
+      setFormError("انتخاب نوع معامله الزامی است.");
+      return;
+    }
+    setBusy(true);
+    setFormError("");
+    setFeedback("");
+    try {
+      await post(csrfToken, `/crm/api/properties/${propId}/listings/`, {
+        deal_type: Number(selectedDealTypeId),
+        terms: listingTerms,
+        sale_price: listingTerms.sale_price ?? null,
+        deposit: listingTerms.deposit ?? null,
+        monthly_rent: listingTerms.monthly_rent ?? null,
+        description: listingDescription.trim(),
+        status: listingStatus,
+      });
+      setFeedback("فایل عرضه ذخیره شد و نسخهٔ شرایط معامله ثبت گردید.");
+      propLoad.reload();
+      reload();
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : "ذخیرهٔ فایل عرضه ناموفق بود.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (typedRole === "finance") {
+    return (
+      <Shell title="ثبت و جریان تأمین ملک" embedded={embedded}>
+        <Card className="py-10 text-center">
+          <p className="text-sm font-bold text-foreground">عدم دسترسی به جریان عملیاتی تأمین ملک</p>
+          <p className="mt-1 text-xs text-muted-foreground">نقش مالی مجاز به ایجاد پرونده یا کارشناسی ملک نیست.</p>
+        </Card>
+      </Shell>
+    );
+  }
+
+  return (
+    <Shell
+      title="جریان یکپارچهٔ تأمین ملک"
+      subtitle="از ثبت سرنخ تا پذیرش، کارشناسی، تأیید ملک و انتشار فایل عرضه در یک مسیر پیوسته"
+      error={error}
+      loading={loading}
+      onReload={reload}
+      embedded={embedded}
+    >
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap gap-2">
+          <Btn
+            type="button"
+            color="light"
+            onClick={() => {
+              setPickerOpen(true);
+              syncWizardUrlParams(selectedCaseId || null, { chooseCase: true });
+            }}
+          >
+            <span className="inline-flex items-center gap-1.5">
+              <FolderSearch size={14} />
+              ادامهٔ پروندهٔ قبلی ({formatFaInt(allCases.length, "۰")})
+            </span>
+          </Btn>
+          {selectedCaseId ? (
+            <Btn
+              type="button"
+              color="light"
+              onClick={() => {
+                setSelectedCaseId("");
+                setViewedStepOverride(null);
+                syncWizardUrlParams(null);
+              }}
+            >
+              <span className="inline-flex items-center gap-1.5">
+                <Plus size={14} />
+                شروع پروندهٔ جدید
+              </span>
+            </Btn>
+          ) : null}
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {activeCase ? (
+            <Btn type="button" color="light" onClick={() => navigate("crm-property-cases", activeCase.id)}>
+              نمای کامل پرونده ({activeCase.code})
+            </Btn>
+          ) : null}
+          <Btn type="button" color="light" onClick={() => navigate("crm-property-cases")}>
+            فهرست پرونده‌ها
+          </Btn>
+        </div>
+      </div>
+
+      <nav aria-label="مراحل هفت‌گانه تأمین ملک" className="mb-5 grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-7">
+        {WIZARD_STEPS.map((step) => {
+          const isCompleted = step.index < serverIndex;
+          const isServerCurrent = step.index === serverIndex;
+          const isSelected = step.key === currentStep;
+          return (
+            <button
+              key={step.key}
+              type="button"
+              aria-current={isSelected ? "step" : undefined}
+              onClick={() => setViewedStepOverride(step.key === serverStep ? null : step.key)}
+              className={`flex flex-col items-start rounded-2xl border p-3 text-right transition-colors ${
+                isSelected
+                  ? "border-primary bg-primary/10 text-foreground"
+                  : isCompleted
+                    ? "border-emerald-500/40 bg-emerald-500/5 text-foreground hover:bg-emerald-500/10"
+                    : "border-border bg-card text-muted-foreground hover:bg-secondary"
+              }`}
+            >
+              <div className="flex w-full items-center justify-between text-xs font-bold">
+                <span>مرحله {(step.index + 1).toLocaleString("fa-IR")}</span>
+                {isCompleted ? (
+                  <Check size={13} className="text-emerald-600 dark:text-emerald-400" />
+                ) : isServerCurrent ? (
+                  <span className="h-2 w-2 rounded-full bg-primary" />
+                ) : (
+                  <Lock size={12} className="text-muted-foreground/70" />
+                )}
+              </div>
+              <strong className="mt-1 text-xs font-bold text-foreground">{step.label}</strong>
+              <span className="mt-0.5 line-clamp-1 text-xs text-muted-foreground">{step.shortDesc}</span>
+            </button>
+          );
+        })}
+      </nav>
+
+      <div className="mb-5 rounded-2xl border border-primary/30 bg-primary/5 p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <span className="text-xs font-bold text-primary">الان چه کاری انجام بدهم؟</span>
+            <h2 className="mt-0.5 text-sm font-bold text-foreground">{guidance.headline}</h2>
+            <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{guidance.body}</p>
+          </div>
+          {viewedStepOverride ? (
+            <Btn type="button" color="light" onClick={() => setViewedStepOverride(null)}>
+              بازگشت به مرحلهٔ جاری ({WIZARD_STEPS[serverIndex]?.label})
+            </Btn>
+          ) : null}
+        </div>
+      </div>
+
+      {restoredDraftAt ? (
+        <div role="status" className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-xl border bg-secondary/70 px-4 py-2.5 text-xs">
+          <span>
+            پیش‌نویس ذخیره‌شدهٔ مرورگر برای حساب شما بازیابی شد ({new Date(restoredDraftAt).toLocaleTimeString("fa-IR")}).
+          </span>
+          <button
+            type="button"
+            onClick={() => {
+              clearSupplyDraft(userKey, selectedCaseId || null);
+              setRestoredDraftAt("");
+              setDraft(EMPTY_DRAFT);
+            }}
+            className="inline-flex items-center gap-1 font-semibold text-destructive hover:underline"
+          >
+            <RotateCcw size={12} />
+            پاک کردن پیش‌نویس محلی
+          </button>
+        </div>
+      ) : null}
+
+      {feedback ? (
+        <div role="status" className="mb-4 flex items-center gap-2 rounded-xl border border-emerald-500/35 bg-emerald-500/10 px-4 py-3 text-sm text-foreground">
+          <CheckCircle2 size={16} className="text-emerald-600 dark:text-emerald-400" />
+          <span>{feedback}</span>
+        </div>
+      ) : null}
+      {formError ? (
+        <div role="alert" className="mb-4 rounded-xl bg-destructive/10 px-4 py-3 text-sm text-destructive">
+          {formError}
+        </div>
+      ) : null}
+
+      {isViewingFuture ? (
+        <Card className="space-y-3 py-8 text-center">
+          <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-2xl bg-secondary text-muted-foreground">
+            <Lock size={20} />
+          </div>
+          <h3 className="text-base font-bold text-foreground">
+            مرحلهٔ «{WIZARD_STEPS[currentIndex]?.label}» هنوز فعال نشده است
+          </h3>
+          <p className="mx-auto max-w-lg text-xs leading-relaxed text-muted-foreground">
+            {guidance.futureLockReason}
+          </p>
+          <div>
+            <Btn type="button" onClick={() => setViewedStepOverride(null)}>
+              بازگشت به مرحلهٔ فعال پرونده
+            </Btn>
+          </div>
+        </Card>
+      ) : isViewingPast && activeCase ? (
+        <Card className="space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b pb-3">
+            <div>
+              <Badge label="مرحلهٔ تکمیل‌شده (فقط‌خواندنی)" variant="success" dot />
+              <h3 className="mt-1 text-sm font-bold text-foreground">
+                خلاصهٔ ثبت‌شده در مرحلهٔ «{WIZARD_STEPS[currentIndex]?.label}»
+              </h3>
+            </div>
+            <Btn type="button" onClick={() => setViewedStepOverride(null)}>
+              ادامه در مرحلهٔ جاری
+            </Btn>
+          </div>
+          <div className="grid gap-3 text-xs sm:grid-cols-3">
+            <div className="rounded-xl bg-secondary p-3">
+              <span className="text-muted-foreground">کد پرونده و شخص</span>
+              <strong className="mt-1 block text-foreground">
+                {activeCase.code} · {activeCase.contact_name}
+              </strong>
+            </div>
+            <div className="rounded-xl bg-secondary p-3">
+              <span className="text-muted-foreground">رنج و مشاور مسئول</span>
+              <strong className="mt-1 block text-foreground">
+                {activeCase.scope_name} · {activeCase.assigned_to_name || "تعیین‌نشده"}
+              </strong>
+            </div>
+            <div className="rounded-xl bg-secondary p-3">
+              <span className="text-muted-foreground">شرح اولیه</span>
+              <strong className="mt-1 block text-foreground">{activeCase.description || "نامشخص"}</strong>
+            </div>
+          </div>
+        </Card>
+      ) : currentStep === "lead" ? (
+        <Card>
+          <form onSubmit={handleCreateLead} className="space-y-4">
+            <h3 className="text-base font-bold text-foreground">مرحلهٔ ۱: ثبت سرنخ و شخص مرتبط</h3>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => updateDraft("contactMode", "new")}
+                className={`rounded-xl border px-3 py-1.5 text-xs font-semibold ${
+                  draft.contactMode === "new" ? "border-primary bg-primary text-primary-foreground" : "bg-card text-foreground"
+                }`}
+              >
+                ثبت شخص جدید
+              </button>
+              <button
+                type="button"
+                onClick={() => updateDraft("contactMode", "existing")}
+                className={`rounded-xl border px-3 py-1.5 text-xs font-semibold ${
+                  draft.contactMode === "existing" ? "border-primary bg-primary text-primary-foreground" : "bg-card text-foreground"
+                }`}
+              >
+                انتخاب از اشخاص موجود
+              </button>
+            </div>
+
+            {draft.contactMode === "new" ? (
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Field label="نام کامل مالک / معرف (الزامی)">
+                  <input
+                    value={draft.contactFullName}
+                    onChange={(e) => updateDraft("contactFullName", e.target.value)}
+                    placeholder="مانند رضا کریمی"
+                    className={inputCls}
+                  />
+                  {fieldErrors.contactFullName ? (
+                    <span className="mt-1 block text-xs text-destructive">{fieldErrors.contactFullName}</span>
+                  ) : null}
+                </Field>
+                <Field label="شماره تماس (الزامی)">
+                  <input
+                    value={draft.contactPhone}
+                    onChange={(e) => updateDraft("contactPhone", e.target.value)}
+                    placeholder="09121234567"
+                    className={inputCls}
+                  />
+                  {fieldErrors.contactPhone ? (
+                    <span className="mt-1 block text-xs text-destructive">{fieldErrors.contactPhone}</span>
+                  ) : null}
+                </Field>
+              </div>
+            ) : (
+              <Field label="شخص موجود در CRM">
+                <select
+                  value={draft.existingContactId}
+                  onChange={(e) => updateDraft("existingContactId", e.target.value)}
+                  className={inputCls}
+                >
+                  <option value="">انتخاب شخص</option>
+                  {contacts.map((c) => (
+                    <option key={String(c.id)} value={String(c.id)}>
+                      {String(c.full_name || "")}
+                    </option>
+                  ))}
+                </select>
+                {fieldErrors.existingContactId ? (
+                  <span className="mt-1 block text-xs text-destructive">{fieldErrors.existingContactId}</span>
+                ) : null}
+              </Field>
+            )}
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Field label="منبع سرنخ">
+                <select
+                  value={draft.leadSource}
+                  onChange={(e) => updateDraft("leadSource", e.target.value)}
+                  className={inputCls}
+                >
+                  {LEAD_SOURCE_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="انواع معاملهٔ مد نظر مالک">
+                <div className="flex flex-wrap gap-1.5 pt-1">
+                  {dealTypes.map((dt) => {
+                    const checked = draft.desiredDealTypes.includes(dt.id);
+                    return (
+                      <button
+                        key={dt.id}
+                        type="button"
+                        onClick={() =>
+                          updateDraft(
+                            "desiredDealTypes",
+                            checked
+                              ? draft.desiredDealTypes.filter((id) => id !== dt.id)
+                              : [...draft.desiredDealTypes, dt.id],
+                          )
+                        }
+                        className={`rounded-lg border px-2.5 py-1 text-xs ${
+                          checked ? "border-primary bg-primary/15 font-semibold text-foreground" : "text-muted-foreground"
+                        }`}
+                      >
+                        {dt.display_name}
+                      </button>
+                    );
+                  })}
+                </div>
+              </Field>
+            </div>
+
+            <Field label="خلاصهٔ اولیهٔ ملک و توضیحات سرنخ (الزامی)">
+              <textarea
+                rows={3}
+                value={draft.leadSummary}
+                onChange={(e) => updateDraft("leadSummary", e.target.value)}
+                placeholder="محدودهٔ تقریبی، نوع ملک، متراژ تقریبی و خواستهٔ اولیهٔ مالک"
+                className={inputCls}
+              />
+              {fieldErrors.leadSummary ? (
+                <span className="mt-1 block text-xs text-destructive">{fieldErrors.leadSummary}</span>
+              ) : null}
+            </Field>
+
+            <div className="flex justify-end">
+              <Btn type="submit" disabled={busy}>
+                ثبت سرنخ و ایجاد پرونده
+              </Btn>
+            </div>
+          </form>
+        </Card>
+      ) : activeCase && currentStep === "reception" ? (
+        <Card className="space-y-4">
+          <h3 className="text-base font-bold text-foreground">مرحلهٔ ۲: پذیرش سرنخ توسط مدیر رنج</h3>
+          <p className="text-xs text-muted-foreground">
+            پرونده <strong>{activeCase.code}</strong> برای <strong>{activeCase.contact_name}</strong> ثبت شده است.
+          </p>
+          {isManager ? (
+            <Btn
+              type="button"
+              disabled={busy}
+              onClick={async () => {
+                setBusy(true);
+                try {
+                  await post(csrfToken, `/crm/api/property-cases/${activeCase.id}/accept_lead/`, {
+                    version: activeCase.version,
+                  });
+                  emitSupplyCountersRefresh();
+                  setFeedback("سرنخ پذیرفته شد؛ اکنون مشاور مسئول و مهلت کارشناسی را مشخص کنید.");
+                  reload();
+                } catch (err) {
+                  setFormError(err instanceof Error ? err.message : "پذیرش سرنخ ناموفق بود.");
+                } finally {
+                  setBusy(false);
+                }
+              }}
+            >
+              تأیید و پذیرش سرنخ
+            </Btn>
+          ) : (
+            <div className="rounded-xl bg-secondary p-4 text-xs text-muted-foreground">
+              سرنخ در انتظار بررسی و پذیرش مدیر رنج است. به محض پذیرش و ارجاع، اعلان برای شما ارسال می‌شود.
+            </div>
+          )}
+        </Card>
+      ) : activeCase && currentStep === "assignment" ? (
+        <Card className="space-y-4">
+          <h3 className="text-base font-bold text-foreground">مرحلهٔ ۳: ارجاع به مشاور و تعیین مهلت الزامی</h3>
+          {isManager ? (
+            <form
+              onSubmit={async (event) => {
+                event.preventDefault();
+                if (!assigneeId || !dueAt) {
+                  setFormError("انتخاب مشاور مسئول و مهلت انجام کارشناسی الزامی است.");
+                  return;
+                }
+                setBusy(true);
+                setFormError("");
+                try {
+                  await post(csrfToken, `/crm/api/property-cases/${activeCase.id}/assign/`, {
+                    assigned_to: Number(assigneeId),
+                    due_at: new Date(dueAt).toISOString(),
+                    version: activeCase.version,
+                  });
+                  emitSupplyCountersRefresh();
+                  setFeedback("پرونده با مهلت مشخص به مشاور ارجاع شد.");
+                  reload();
+                } catch (err) {
+                  setFormError(err instanceof Error ? err.message : "ارجاع پرونده ناموفق بود.");
+                } finally {
+                  setBusy(false);
+                }
+              }}
+              className="grid gap-3 sm:grid-cols-3"
+            >
+              <Field label="مشاور مسئول">
+                <select value={assigneeId} onChange={(e) => setAssigneeId(e.target.value)} className={inputCls} required>
+                  <option value="">انتخاب مشاور</option>
+                  {selectableStaff.map((s) => {
+                    const uid = s.user_detail?.id ?? s.user ?? s.id;
+                    const label = s.user_detail?.full_name || s.full_name || s.username || `کاربر ${String(uid)}`;
+                    return (
+                      <option key={String(uid)} value={String(uid)}>
+                        {String(label)}
+                      </option>
+                    );
+                  })}
+                </select>
+              </Field>
+              <Field label="مهلت کارشناسی (الزامی)">
+                <input
+                  type="datetime-local"
+                  value={dueAt}
+                  onChange={(e) => setDueAt(e.target.value)}
+                  className={inputCls}
+                  required
+                />
+              </Field>
+              <div className="flex items-end">
+                <Btn type="submit" disabled={busy}>
+                  ثبت ارجاع
+                </Btn>
+              </div>
+            </form>
+          ) : (
+            <p className="rounded-xl bg-secondary p-4 text-xs text-muted-foreground">
+              در انتظار تعیین مشاور مسئول و مهلت کارشناسی توسط مدیر رنج.
+            </p>
+          )}
+        </Card>
+      ) : activeCase && currentStep === "acceptance" ? (
+        <Card className="space-y-4">
+          <h3 className="text-base font-bold text-foreground">مرحلهٔ ۴: پذیرش یا رد ارجاع توسط مشاور</h3>
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-secondary p-3.5 text-xs">
+            <span>مشاور ارجاع‌شده: <strong>{activeCase.assigned_to_name || "نامشخص"}</strong></span>
+            <span>مهلت تعیین‌شده: <strong>{activeCase.due_at ? new Date(activeCase.due_at).toLocaleString("fa-IR") : "نامشخص"}</strong></span>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Btn
+              type="button"
+              disabled={busy}
+              onClick={async () => {
+                setBusy(true);
+                setFormError("");
+                try {
+                  await post(csrfToken, `/crm/api/property-cases/${activeCase.id}/accept_assignment/`, {
+                    version: activeCase.version,
+                  });
+                  emitSupplyCountersRefresh();
+                  setFeedback("ارجاع پذیرفته شد؛ فرم کارشناسی ملک اکنون فعال است.");
+                  reload();
+                } catch (err) {
+                  setFormError(err instanceof Error ? err.message : "پذیرش ارجاع ناموفق بود.");
+                } finally {
+                  setBusy(false);
+                }
+              }}
+            >
+              پذیرش ارجاع و شروع کارشناسی
+            </Btn>
+          </div>
+          <div className="grid gap-2 border-t pt-3 sm:grid-cols-3">
+            <div className="sm:col-span-2">
+              <input
+                value={rejectReason}
+                onChange={(e) => setRejectReason(e.target.value)}
+                placeholder="در صورت عدم امکان انجام کارشناسی، علت دقیق رد ارجاع را بنویسید"
+                className={inputCls}
+              />
+            </div>
+            <Btn
+              type="button"
+              color="danger"
+              disabled={busy}
+              onClick={async () => {
+                if (!rejectReason.trim()) {
+                  setFormError("ثبت دلیل برای رد ارجاع الزامی است.");
+                  return;
+                }
+                setBusy(true);
+                setFormError("");
+                try {
+                  await post(csrfToken, `/crm/api/property-cases/${activeCase.id}/reject_assignment/`, {
+                    reason: rejectReason.trim(),
+                    version: activeCase.version,
+                  });
+                  emitSupplyCountersRefresh();
+                  setFeedback("ارجاع با ذکر دلیل به مدیر رنج بازگردانده شد.");
+                  reload();
+                } catch (err) {
+                  setFormError(err instanceof Error ? err.message : "رد ارجاع ناموفق بود.");
+                } finally {
+                  setBusy(false);
+                }
+              }}
+            >
+              رد ارجاع با ذکر دلیل
+            </Btn>
+          </div>
+        </Card>
+      ) : activeCase && currentStep === "appraisal" ? (
+        <Card className="space-y-5">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b pb-3">
+            <div>
+              <h3 className="text-base font-bold text-foreground">مرحلهٔ ۵: تکمیل مشخصات ملک، مالکان و گزارش کارشناسی</h3>
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                ذخیرهٔ این بخش فقط ملک و گزارش کارشناسی را ثبت می‌کند و هیچ فایل عرضه‌ای پیش از تأیید مدیر ایجاد نمی‌شود.
+              </p>
+            </div>
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            <Field label={isManager ? "عنوان مدیریتی ملک (اختصاصی مدیر)" : "عنوان مدیریتی ملک (توسط مدیر تعیین می‌شود)"}>
+              <input
+                value={draft.propertyTitle}
+                onChange={(e) => updateDraft("propertyTitle", e.target.value)}
+                readOnly={!isManager}
+                placeholder={isManager ? "مانند آپارتمان ۱۴۵ متری جردن" : "فقط قابل مشاهده برای مشاور"}
+                className={`${inputCls} ${!isManager ? "opacity-70" : ""}`}
+              />
+            </Field>
+            <Field label="منطقه (الزامی)">
+              <select
+                value={draft.districtId}
+                onChange={(e) => updateDraft("districtId", e.target.value)}
+                className={inputCls}
+              >
+                <option value="">انتخاب منطقه</option>
+                {districtOptions.map((d) => (
+                  <option key={d.id} value={String(d.id)}>
+                    {d.label}
+                  </option>
+                ))}
+              </select>
+              {fieldErrors.districtId ? <span className="mt-1 block text-xs text-destructive">{fieldErrors.districtId}</span> : null}
+            </Field>
+            <Field label="نوع ملک">
+              <select
+                value={draft.propertyType}
+                onChange={(e) => updateDraft("propertyType", e.target.value)}
+                className={inputCls}
+              >
+                <option value="APARTMENT">آپارتمان</option>
+                <option value="VILLA">ویلایی</option>
+                <option value="OFFICE">اداری</option>
+                <option value="COMMERCIAL">تجاری</option>
+                <option value="LAND">زمین / کلنگی</option>
+              </select>
+            </Field>
+            <Field label="متراژ به متر مربع (الزامی)">
+              <input
+                type="number"
+                min={1}
+                value={draft.area}
+                onChange={(e) => updateDraft("area", e.target.value)}
+                className={inputCls}
+              />
+              {fieldErrors.area ? <span className="mt-1 block text-xs text-destructive">{fieldErrors.area}</span> : null}
+            </Field>
+            <Field label="تعداد اتاق">
+              <input
+                type="number"
+                min={0}
+                value={draft.rooms}
+                onChange={(e) => updateDraft("rooms", e.target.value)}
+                className={inputCls}
+              />
+            </Field>
+            <Field label="طبقه / سال ساخت">
+              <div className="grid grid-cols-2 gap-2">
+                <input
+                  type="number"
+                  value={draft.floor}
+                  onChange={(e) => updateDraft("floor", e.target.value)}
+                  placeholder="طبقه"
+                  className={inputCls}
+                />
+                <input
+                  type="number"
+                  value={draft.builtYear}
+                  onChange={(e) => updateDraft("builtYear", e.target.value)}
+                  placeholder="سال ساخت"
+                  className={inputCls}
+                />
+              </div>
+            </Field>
+          </div>
+
+          <Field label="نشانی دقیق ملک (محرمانه در سامانهٔ داخلی — الزامی)">
+            <input
+              value={draft.address}
+              onChange={(e) => updateDraft("address", e.target.value)}
+              placeholder="خیابان، کوچه، پلاک و واحد"
+              className={inputCls}
+            />
+            {fieldErrors.address ? <span className="mt-1 block text-xs text-destructive">{fieldErrors.address}</span> : null}
+          </Field>
+
+          <div className="space-y-2 rounded-xl border p-3.5">
+            <div className="flex items-center justify-between">
+              <strong className="text-xs font-bold text-foreground">مالکان و نمایندگان قانونی ملک (PropertyParty)</strong>
+              <button
+                type="button"
+                onClick={() =>
+                  updateDraft("parties", [
+                    ...draft.parties,
+                    { fullName: "", phone: "", role: "OWNER_REPRESENTATIVE", sharePercent: "", isPrimary: false },
+                  ])
+                }
+                className="inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs font-semibold hover:bg-secondary"
+              >
+                <Plus size={12} />
+                افزودن مالک / نماینده
+              </button>
+            </div>
+            {draft.parties.map((party, idx) => (
+              <div key={idx} className="grid gap-2 sm:grid-cols-5">
+                <input
+                  value={party.fullName}
+                  onChange={(e) => {
+                    const next = [...draft.parties];
+                    next[idx] = { ...next[idx], fullName: e.target.value };
+                    updateDraft("parties", next);
+                  }}
+                  placeholder="نام کامل"
+                  className={inputCls}
+                />
+                <input
+                  value={party.phone}
+                  onChange={(e) => {
+                    const next = [...draft.parties];
+                    next[idx] = { ...next[idx], phone: e.target.value };
+                    updateDraft("parties", next);
+                  }}
+                  placeholder="شماره تماس"
+                  className={inputCls}
+                />
+                <select
+                  value={party.role}
+                  onChange={(e) => {
+                    const next = [...draft.parties];
+                    next[idx] = { ...next[idx], role: e.target.value as PropertyPartyRow["role"] };
+                    updateDraft("parties", next);
+                  }}
+                  className={inputCls}
+                >
+                  <option value="OWNER">مالک</option>
+                  <option value="OWNER_REPRESENTATIVE">نماینده مالک</option>
+                </select>
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  value={party.sharePercent ?? ""}
+                  onChange={(e) => {
+                    const next = [...draft.parties];
+                    next[idx] = { ...next[idx], sharePercent: e.target.value };
+                    updateDraft("parties", next);
+                  }}
+                  placeholder="سهم (٪)"
+                  className={inputCls}
+                />
+                <div className="flex items-center justify-end">
+                  {draft.parties.length > 1 ? (
+                    <button
+                      type="button"
+                      aria-label="حذف ردیف شخص"
+                      onClick={() => updateDraft("parties", draft.parties.filter((_, i) => i !== idx))}
+                      className="rounded-lg p-2 text-destructive hover:bg-destructive/10"
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field label="متن کامل گزارش کارشناسی (الزامی)">
+              <textarea
+                rows={4}
+                value={draft.reportText}
+                onChange={(e) => updateDraft("reportText", e.target.value)}
+                placeholder="کیفیت ساخت، نورگیری، وضعیت مشاعات، وضعیت سند و ارزیابی کارشناسی"
+                className={inputCls}
+              />
+              {fieldErrors.reportText ? (
+                <span className="mt-1 block text-xs text-destructive">{fieldErrors.reportText}</span>
+              ) : null}
+            </Field>
+            <Field label="یادداشت‌های داخلی بازدید و هماهنگی کلید">
+              <textarea
+                rows={4}
+                value={draft.visitNotes}
+                onChange={(e) => updateDraft("visitNotes", e.target.value)}
+                placeholder="نکات هماهنگی بازدید (محرمانه و غیرقابل نمایش در اکسپلور عمومی)"
+                className={inputCls}
+              />
+            </Field>
+          </div>
+
+          <div className="flex flex-wrap justify-end gap-2 border-t pt-3">
+            <Btn type="button" color="light" disabled={busy} onClick={() => void handleSaveAppraisal(false)}>
+              ذخیره پیش‌نویس کارشناسی
+            </Btn>
+            <Btn type="button" disabled={busy} onClick={() => void handleSaveAppraisal(true)}>
+              ذخیره و ارسال برای تأیید مدیر
+            </Btn>
+          </div>
+        </Card>
+      ) : activeCase && currentStep === "review" ? (
+        <Card className="space-y-4">
+          <h3 className="text-base font-bold text-foreground">مرحلهٔ ۶: بررسی گزارش کارشناسی و تأیید ملک</h3>
+          <div className="rounded-xl bg-secondary/70 p-4 text-xs leading-relaxed">
+            <strong>گزارش کارشناسی ارسالی:</strong>
+            <p className="mt-1 whitespace-pre-wrap text-muted-foreground">
+              {activeCase.appraisal?.report_text || "گزارش ثبت نشده است."}
+            </p>
+          </div>
+          {isManager ? (
+            <div className="space-y-3">
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Field label="عنوان مدیریتی ملک (الزامی برای تأیید)">
+                  <input
+                    value={draft.propertyTitle}
+                    onChange={(e) => updateDraft("propertyTitle", e.target.value)}
+                    placeholder="عنوان رسمی ملک"
+                    className={inputCls}
+                  />
+                </Field>
+                <Field label="نتیجه بررسی">
+                  <select
+                    value={reviewDecision}
+                    onChange={(e) => setReviewDecision(e.target.value as "APPROVED" | "CHANGES_REQUIRED")}
+                    className={inputCls}
+                  >
+                    <option value="APPROVED">تأیید نهایی ملک</option>
+                    <option value="CHANGES_REQUIRED">نیازمند اصلاح کارشناسی</option>
+                  </select>
+                </Field>
+              </div>
+              {reviewDecision === "CHANGES_REQUIRED" ? (
+                <Field label="علت نیازمند اصلاح بودن (الزامی)">
+                  <textarea
+                    rows={2}
+                    value={reviewReason}
+                    onChange={(e) => setReviewReason(e.target.value)}
+                    className={inputCls}
+                  />
+                </Field>
+              ) : null}
+              <div className="flex justify-end gap-2">
+                <Btn
+                  type="button"
+                  disabled={busy}
+                  onClick={async () => {
+                    if (reviewDecision === "APPROVED" && !draft.propertyTitle.trim()) {
+                      setFormError("تعیین عنوان مدیریتی ملک پیش از تأیید نهایی الزامی است.");
+                      return;
+                    }
+                    if (reviewDecision === "CHANGES_REQUIRED" && !reviewReason.trim()) {
+                      setFormError("ثبت دلیل اصلاح برای بازگرداندن پرونده الزامی است.");
+                      return;
+                    }
+                    setBusy(true);
+                    setFormError("");
+                    try {
+                      await post(csrfToken, `/crm/api/property-cases/${activeCase.id}/review_property/`, {
+                        decision: reviewDecision,
+                        property_title: draft.propertyTitle.trim(),
+                        reason: reviewReason.trim(),
+                        case_version: activeCase.version,
+                      });
+                      emitSupplyCountersRefresh();
+                      setFeedback(
+                        reviewDecision === "APPROVED"
+                          ? "ملک تأیید نهایی شد؛ اکنون می‌توانید فایل‌های عرضه را تعریف کنید."
+                          : "پرونده برای اصلاح کارشناسی بازگردانده شد.",
+                      );
+                      reload();
+                    } catch (err) {
+                      setFormError(err instanceof Error ? err.message : "ثبت تصمیم بررسی ناموفق بود.");
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                >
+                  ثبت تصمیم نهایی بررسی
+                </Btn>
+              </div>
+            </div>
+          ) : (
+            <p className="rounded-xl bg-secondary p-4 text-xs text-muted-foreground">
+              گزارش کارشناسی در صف تأیید مدیر رنج قرار دارد.
+            </p>
+          )}
+        </Card>
+      ) : activeCase ? (
+        <div className="space-y-4">
+          <Card className="space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b pb-3">
+              <div>
+                <h3 className="text-base font-bold text-foreground">
+                  مرحلهٔ ۷: تعریف و مدیریت فایل‌های عرضه برای ملک «{activeCase.property_title}»
+                </h3>
+                <p className="mt-0.5 text-xs text-muted-foreground">
+                  برای هر نوع معاملهٔ فعال، یک فایل عرضه با شرایط اختصاصی همان نوع معامله ثبت یا به‌روزرسانی می‌شود.
+                </p>
+              </div>
+              {propId ? (
+                <div className="flex gap-2">
+                  <Btn type="button" color="light" onClick={() => navigate("property-detail", propId)}>
+                    صفحهٔ جزئیات ملک
+                  </Btn>
+                  <Btn type="button" color="light" onClick={() => navigate("property-files-explore")}>
+                    اکسپلور فایل‌ها
+                  </Btn>
+                </div>
+              ) : null}
+            </div>
+
+            {dealTypePreview ? (
+              <div role="alert" className="space-y-2 rounded-xl border border-amber-500/45 bg-amber-500/10 p-3.5 text-xs">
+                <div className="flex items-center gap-1.5 font-bold text-foreground">
+                  <AlertTriangle size={15} className="text-amber-600 dark:text-amber-400" />
+                  <span>پیش‌نمایش تأثیر تغییر نوع معامله</span>
+                </div>
+                <p className="text-muted-foreground">
+                  با تغییر نوع معامله، فیلدهای ناسازگار زیر بدون انتقال پنهان حذف می‌شوند:{" "}
+                  <strong className="text-foreground">
+                    {dealTypePreview.incompatibleFields.map((f) => f.label).join("، ")}
+                  </strong>
+                </p>
+                <div className="flex gap-2">
+                  <Btn type="button" onClick={confirmDealTypeSwitch}>
+                    تأیید و تغییر نوع معامله
+                  </Btn>
+                  <Btn
+                    type="button"
+                    color="light"
+                    onClick={() => {
+                      setPendingDealTypeId("");
+                      setDealTypePreview(null);
+                    }}
+                  >
+                    انصراف
+                  </Btn>
+                </div>
+              </div>
+            ) : null}
+
+            <form onSubmit={handleSaveListing} className="space-y-4">
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Field label="نوع معامله (نسخهٔ منتشرشده)">
+                  <select
+                    value={selectedDealTypeId}
+                    onChange={(e) => handleDealTypeSelect(e.target.value)}
+                    className={inputCls}
+                    required
+                  >
+                    <option value="">انتخاب نوع معامله</option>
+                    {dealTypes.map((dt) => (
+                      <option key={dt.id} value={String(dt.id)}>
+                        {dt.display_name}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <Field label="وضعیت فایل عرضه">
+                  <select
+                    value={listingStatus}
+                    onChange={(e) => setListingStatus(e.target.value as "DRAFT" | "ACTIVE" | "PAUSED")}
+                    className={inputCls}
+                  >
+                    <option value="ACTIVE">فعال (نمایش در اکسپلور)</option>
+                    <option value="DRAFT">پیش‌نویس</option>
+                    <option value="PAUSED">متوقف</option>
+                  </select>
+                </Field>
+              </div>
+
+              {currentSchema?.fields?.length ? (
+                <div className="grid gap-3 rounded-xl border p-3.5 sm:grid-cols-2">
+                  {currentSchema.fields.map((field) => (
+                    <Field
+                      key={field.key}
+                      label={`${field.label}${field.unit ? ` (${field.unit})` : ""}${field.required ? " *" : ""}`}
+                    >
+                      {field.type === "boolean" ? (
+                        <input
+                          type="checkbox"
+                          checked={Boolean(listingTerms[field.key])}
+                          onChange={(e) =>
+                            setListingTerms((prev) => ({ ...prev, [field.key]: e.target.checked }))
+                          }
+                        />
+                      ) : (
+                        <input
+                          type={field.type === "integer" || field.type === "decimal" ? "number" : field.type === "date" ? "date" : "text"}
+                          value={String(listingTerms[field.key] ?? "")}
+                          onChange={(e) =>
+                            setListingTerms((prev) => ({
+                              ...prev,
+                              [field.key]:
+                                field.type === "integer" || field.type === "decimal"
+                                  ? e.target.value === ""
+                                    ? ""
+                                    : Number(e.target.value)
+                                  : e.target.value,
+                            }))
+                          }
+                          required={field.required}
+                          className={inputCls}
+                        />
+                      )}
+                    </Field>
+                  ))}
+                </div>
+              ) : null}
+
+              <Field label="توضیحات عمومی فایل عرضه">
+                <textarea
+                  rows={2}
+                  value={listingDescription}
+                  onChange={(e) => setListingDescription(e.target.value)}
+                  placeholder="توضیحات قابل نمایش برای معرفی و اکسپلور"
+                  className={inputCls}
+                />
+              </Field>
+
+              <div className="flex justify-end">
+                <Btn type="submit" disabled={busy || !selectedDealTypeId}>
+                  ذخیره فایل عرضه
+                </Btn>
+              </div>
+            </form>
+          </Card>
+
+          <Card className="space-y-3">
+            <h4 className="text-sm font-bold text-foreground">
+              فایل‌های عرضهٔ ثبت‌شده برای این ملک ({formatFaInt(propertyListings.length, "۰")})
+            </h4>
+            {!propertyListings.length ? (
+              <EmptyState
+                title="هنوز فایل عرضه‌ای برای این ملک ثبت نشده است"
+                description="از فرم بالا اولین فایل عرضه را بر اساس نوع معاملهٔ مورد نظر ایجاد کنید."
+              />
+            ) : (
+              <div className="space-y-2">
+                {propertyListings.map((lf) => {
+                  const meta = supplyStatusBadgeMeta("listing", lf.status);
+                  const saleVal = lf.salePrice ?? lf.sale_price;
+                  const depVal = lf.deposit;
+                  const rentVal = lf.monthlyRent ?? lf.monthly_rent;
+                  return (
+                    <div key={lf.id} className="flex flex-wrap items-center justify-between gap-3 rounded-xl border p-3 text-xs">
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2">
+                          <strong className="text-sm text-foreground">{lf.title}</strong>
+                          <Badge label={meta.label} variant={meta.variant} dot />
+                          {lf.dealTypeDisplay ? (
+                            <span className="text-muted-foreground">({lf.dealTypeDisplay})</span>
+                          ) : null}
+                        </div>
+                        <div className="text-muted-foreground">
+                          {saleVal ? `ثمن: ${formatFaAmount(saleVal)} ` : ""}
+                          {depVal ? `ودیعه: ${formatFaAmount(depVal)} ` : ""}
+                          {rentVal ? `اجاره: ${formatFaAmount(rentVal)}` : ""}
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {lf.status !== "PAUSED" ? (
+                          <Btn
+                            type="button"
+                            color="light"
+                            onClick={async () => {
+                              await patch(csrfToken, `/crm/api/listings/${lf.id}/`, {
+                                deal_type: lf.dealType ?? lf.deal_type,
+                                status: "PAUSED",
+                              });
+                              propLoad.reload();
+                            }}
+                          >
+                            توقف عرضه
+                          </Btn>
+                        ) : (
+                          <Btn
+                            type="button"
+                            color="light"
+                            onClick={async () => {
+                              await patch(csrfToken, `/crm/api/listings/${lf.id}/`, {
+                                deal_type: lf.dealType ?? lf.deal_type,
+                                status: "ACTIVE",
+                              });
+                              propLoad.reload();
+                            }}
+                          >
+                            فعال‌سازی مجدد
+                          </Btn>
+                        )}
+                        <Btn type="button" color="light" onClick={() => navigate("property-file-detail", lf.id)}>
+                          جزئیات فایل
+                        </Btn>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </Card>
+        </div>
+      ) : null}
+
+      <AccessibleModal
+        open={pickerOpen}
+        onClose={() => {
+          setPickerOpen(false);
+          syncWizardUrlParams(selectedCaseId || null);
+        }}
+        title="ادامهٔ پروندهٔ قبلی"
+        subtitle="جست‌وجو بر اساس کد پرونده، نام شخص، عنوان ملک یا رنج (حساسیت یکسان برای ارقام و حروف فارسی/عربی)"
+        maxWidthClass="max-w-2xl"
+      >
+        <SearchBar
+          value={pickerSearch}
+          onChange={setPickerSearch}
+          placeholder="کد پرونده، نام مالک یا محله را وارد کنید…"
+        />
+        <div className="max-h-96 space-y-2 overflow-y-auto">
+          {pickerFilteredCases.map((item) => {
+            const stall = computeStallInfo(item);
+            return (
+              <div
+                key={item.id}
+                className="flex flex-wrap items-center justify-between gap-2 rounded-xl border p-3 text-xs hover:bg-secondary/40"
+              >
+                <div>
+                  <div className="flex items-center gap-2">
+                    <strong className="font-mono text-foreground">{item.code}</strong>
+                    <Badge label={STAGE_LABELS_FA[item.stage] || item.stage} variant="teal" dot />
+                    {stall.isStalled ? <Badge label="راکد" variant="danger" /> : null}
+                  </div>
+                  <div className="mt-1 text-muted-foreground">
+                    {item.property_title || item.description || item.contact_name} · مسئول: {item.assigned_to_name || "تعیین‌نشده"}
+                  </div>
+                </div>
+                <Btn
+                  type="button"
+                  onClick={() => {
+                    setSelectedCaseId(String(item.id));
+                    setPickerOpen(false);
+                    syncWizardUrlParams(item.id);
+                  }}
+                >
+                  انتخاب و ادامه
+                </Btn>
+              </div>
+            );
+          })}
+          {!pickerFilteredCases.length ? (
+            <p className="py-6 text-center text-xs text-muted-foreground">پروندهٔ منطبقی یافت نشد.</p>
+          ) : null}
+        </div>
+      </AccessibleModal>
+
+      <AccessibleModal
+        open={reviewSummaryOpen && Boolean(activeCase)}
+        onClose={() => {
+          setReviewSummaryOpen(false);
+          syncWizardUrlParams(activeCase?.id || null);
+        }}
+        title="درخواست تأیید ملک ثبت شد"
+        subtitle="خلاصهٔ اطلاعات کارشناسی ارسال‌شده به صف بررسی مدیر رنج"
+        maxWidthClass="max-w-lg"
+      >
+        {activeCase ? (
+          <div className="space-y-3 text-xs">
+            <div className="rounded-xl bg-secondary p-3.5 space-y-1.5">
+              <div>کد پرونده: <strong className="font-mono">{activeCase.code}</strong></div>
+              <div>شخص مرتبط: <strong>{activeCase.contact_name}</strong></div>
+              <div>نسخهٔ ارسالی بررسی: <strong>{formatFaInt(submittedReviewVersion ?? activeCase.version)}</strong></div>
+              <div>وضعیت کنونی: <strong>در انتظار بررسی و تأیید مدیر رنج</strong></div>
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <Btn
+                type="button"
+                color="light"
+                onClick={() => {
+                  setReviewSummaryOpen(false);
+                  navigate("crm-property-cases", activeCase.id);
+                }}
+              >
+                مشاهده پرونده
+              </Btn>
+              <Btn
+                type="button"
+                onClick={() => {
+                  setReviewSummaryOpen(false);
+                  syncWizardUrlParams(activeCase.id);
+                }}
+              >
+                متوجه شدم
+              </Btn>
+            </div>
+          </div>
+        ) : null}
+      </AccessibleModal>
+    </Shell>
+  );
+}
+
+export const PropertyRegister = PropertyRegisterPage;

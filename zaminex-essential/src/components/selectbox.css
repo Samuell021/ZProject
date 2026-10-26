@@ -1,0 +1,30 @@
+.selectbox { position: relative; display: inline-flex; flex-direction: column; min-width: 0; width: 100%; vertical-align: middle; }
+.selectbox-native { position: absolute; inline-size: 0.0625rem; block-size: 0.0625rem; opacity: 0; pointer-events: none; clip-path: inset(50%); }
+button.selectbox-trigger { display: flex; width: 100%; min-width: 0; min-height: 2.7rem; justify-content: space-between; gap: 0.65rem; padding: 0.55rem 0.8rem; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 0.65rem; font-size: 0.84rem; font-weight: 400; text-align: start; box-shadow: 0 0.0625rem 0.125rem #00000005; }
+button.selectbox-trigger:hover { border-color: var(--accent); filter: none; transform: none; }
+button.selectbox-trigger:focus-visible, button.selectbox-trigger[aria-expanded="true"] { outline: 0.15rem solid var(--accent-soft); border-color: var(--accent); }
+button.selectbox-trigger[aria-invalid="true"] { border-color: var(--danger); }
+.selectbox-trigger > span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.selectbox-trigger > svg { flex-shrink: 0; color: var(--muted); transition: transform 0.15s; }
+.selectbox-trigger[aria-expanded="true"] > svg { transform: rotate(180deg); }
+.selectbox-placeholder { color: var(--muted); }
+.selectbox-menu { position: fixed; z-index: 200; inset: auto; margin: 0; padding: 0.35rem; min-width: 0; flex-direction: column; overflow: hidden; border: 1px solid var(--border); border-radius: 0.8rem; background: var(--surface); color: var(--text); box-shadow: 0 0.5rem 1.8rem #152e2926; font-size: 0.84rem; }
+.selectbox-options { display: block; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+.selectbox-option { display: flex; align-items: center; justify-content: space-between; gap: 0.7rem; min-height: 2.6rem; padding: 0.5rem 0.65rem; margin-block: 0.1rem; border-radius: 0.5rem; cursor: pointer; }
+.selectbox-option > span { min-width: 0; overflow-wrap: anywhere; }
+.selectbox-option > svg { flex-shrink: 0; color: var(--accent); }
+.selectbox-option.is-active, .selectbox-option[aria-selected="true"] { background: var(--accent-soft); color: var(--accent); }
+.selectbox-option[aria-selected="true"] { font-weight: 600; }
+.selectbox-option[aria-disabled="true"] { opacity: 0.45; cursor: not-allowed; }
+.selectbox-search { display: flex; align-items: center; gap: 0.5rem; padding: 0.35rem 0.5rem; border: 1px solid var(--border); border-radius: 0.5rem; margin-bottom: 0.35rem; color: var(--muted); flex-shrink: 0; }
+.selectbox-search input { width: 100%; min-width: 0; padding: 0.2rem 0; border: 0; background: transparent; color: var(--text); outline: none; font-size: inherit; }
+.selectbox-search input:focus { box-shadow: none; }
+.selectbox-empty { display: block; padding: 1rem; text-align: center; color: var(--muted); }
+.selectbox-error { color: var(--danger); }
+.topbar-actions > .selectbox { width: clamp(10rem, 20vw, 20rem); }
+.toolbar > .selectbox, .pipeline-filters > .selectbox { width: auto; min-width: 9rem; max-width: 18rem; }
+.calendar-controls > .selectbox { flex: 1; width: auto; }
+.calendar-controls .selectbox-trigger, .calendar-time .selectbox-trigger { min-height: 2rem; padding: 0.25rem 0.35rem; font-size: 0.8rem; }
+.calendar-time > .selectbox { width: 4.5rem; }
+@media (max-width: 760px) { .topbar-actions > .selectbox { width: min(13rem, 45vw); } .toolbar > .selectbox { flex: 1; min-width: 8rem; } }
+@media (prefers-reduced-motion: reduce) { .selectbox-trigger > svg { transition: none; } }
