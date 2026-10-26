@@ -165,6 +165,9 @@ export function ReviewsQueuePage({ csrfToken, role, navigate, embedded }: CrmPag
             const badgeMeta = supplyStatusBadgeMeta("property_review", item.decision);
             const rowErr = fieldErrorByReview[item.id];
             const isPending = item.decision === "PENDING";
+            const snapshot = item.snapshot || {};
+            const snapshotAttributes = snapshot.attributes || [];
+            const snapshotImages = snapshot.images || [];
 
             return (
               <Card key={item.id} className="space-y-4">
@@ -180,14 +183,15 @@ export function ReviewsQueuePage({ csrfToken, role, navigate, embedded }: CrmPag
                       </span>
                     </div>
                     <h3 className="text-base font-bold text-foreground">
-                      {item.property_title || "بدون عنوان مدیریتی"}
+                      {snapshot.property_title || snapshot.title || item.property_title || "بدون عنوان مدیریتی"}
                     </h3>
                     <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
                       <span>رنج: {item.scope_name || "نامشخص"}</span>
                       <span>مشاور مسئول: {item.assignee_name || item.submitted_by_name || "نامشخص"}</span>
-                      <span>منطقه: {item.property_district || "نامشخص"}</span>
-                      <span>متراژ: {formatFaInt(item.property_area)} متر مربع</span>
-                      <span>نوع ملک: {item.property_type_display || "نامشخص"}</span>
+                      <span>منطقه: {snapshot.location_path || item.property_district || "نامشخص"}</span>
+                      <span>متراژ: {formatFaInt(snapshot.area ?? item.property_area)} متر مربع</span>
+                      <span>نوع ملک: {snapshot.property_type_display || item.property_type_display || "نامشخص"}</span>
+                      {snapshot.property_usage_name ? <span>کاربری: {snapshot.property_usage_name}</span> : null}
                     </div>
                   </div>
                   <div className="flex flex-wrap gap-2">
@@ -203,6 +207,43 @@ export function ReviewsQueuePage({ csrfToken, role, navigate, embedded }: CrmPag
                     <Btn type="button" color="light" onClick={() => navigate("property-detail", item.property)}>
                       جزئیات ملک
                     </Btn>
+                  </div>
+                </div>
+
+                <div className="grid gap-3 rounded-xl border border-border p-3.5 text-xs md:grid-cols-2">
+                  <div className="space-y-1.5">
+                    <strong className="text-foreground">موقعیت ثبت‌شده در نسخهٔ ارسالی</strong>
+                    <div className="text-muted-foreground">
+                      {[snapshot.province_name, snapshot.city_name, snapshot.location_path].filter(Boolean).join(" / ") || item.property_district || "موقعیت ثبت نشده"}
+                    </div>
+                    {snapshot.latitude != null && snapshot.longitude != null ? (
+                      <div className="font-mono text-muted-foreground" dir="ltr">{snapshot.latitude}, {snapshot.longitude}</div>
+                    ) : <div className="text-muted-foreground">مختصات نقشه ثبت نشده است.</div>}
+                  </div>
+                  <div>
+                    <strong className="text-foreground">ویژگی‌های ثبت‌شده در نسخهٔ ارسالی</strong>
+                    {snapshotAttributes.length ? (
+                      <dl className="mt-1 grid grid-cols-2 gap-x-3 gap-y-1">
+                        {snapshotAttributes.map((attribute) => (
+                          <React.Fragment key={`${attribute.id}:${attribute.name}`}>
+                            <dt className="text-muted-foreground">{attribute.display_name}</dt>
+                            <dd className="break-words text-foreground">{attribute.display_value || "—"}</dd>
+                          </React.Fragment>
+                        ))}
+                      </dl>
+                    ) : <p className="mt-1 text-muted-foreground">ویژگی پویایی ثبت نشده است.</p>}
+                  </div>
+                  <div className="md:col-span-2">
+                    <strong className="text-foreground">تصاویر همراه درخواست ({snapshotImages.length})</strong>
+                    {snapshotImages.length ? (
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {snapshotImages.map((image) => image.url ? (
+                          <a key={image.id} href={image.url} target="_blank" rel="noreferrer" className="block h-20 w-20 overflow-hidden rounded-lg border border-border">
+                            <img src={image.url} alt={`تصویر ملک ${image.id}`} className="h-full w-full object-cover" />
+                          </a>
+                        ) : null)}
+                      </div>
+                    ) : <p className="mt-1 text-muted-foreground">تصویری در نسخهٔ ارسالی نبوده است.</p>}
                   </div>
                 </div>
 
@@ -228,7 +269,7 @@ export function ReviewsQueuePage({ csrfToken, role, navigate, embedded }: CrmPag
                   <div className="space-y-1.5">
                     <div>
                       <span className="font-semibold text-foreground">نشانی ملک: </span>
-                      <span className="text-muted-foreground">{item.property_address || "نامشخص"}</span>
+                      <span className="text-muted-foreground">{snapshot.address || item.property_address || "نامشخص"}</span>
                     </div>
                     {item.appraisal_summary?.visit_notes ? (
                       <div>

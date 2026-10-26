@@ -1,20 +1,24 @@
 from datetime import timedelta
 from decimal import Decimal
+from io import BytesIO
+from tempfile import TemporaryDirectory
 
 from django.contrib.auth.models import Group
-from django.test import TestCase
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 
 from apps.accounts.models import ManagementScope, ScopeMembership, User
-from apps.basics.models import City, DealType, DealTypeVersion, District, PropertyType, PropertyUsage, Province
+from apps.basics.models import Attribute, City, DealType, DealTypeVersion, District, PropertyType, PropertyTypeAttribute, PropertyUsage, Province
 from apps.basics.terms import default_terms_schema
 from apps.crm import models
 from apps.crm.services import CASE_CONFLICT_DETAIL, property_case_stage
 from apps.listings.models import Listing
 from apps.notifications.models import Notification
-from apps.properties.models import Property
+from apps.properties.models import Property, PropertyAttributeValue
 from apps.tasks.models import Task
+from PIL import Image
 
 
 class SupplyPipelineTests(TestCase):
@@ -669,3 +673,163 @@ class SupplyPipelineTests(TestCase):
         self.assertEqual(root_explore.status_code, 200)
 
 
+    def test_appraisal_persists_location_coordinates_type_attributes_and_review_snapshot(self):
+        parking = Attribute.objects.create(
+            name="supply_parking",
+            display_name="پارکینگ",
+            data_type=Attribute.DataType.BOOLEAN,
+            entity=Attribute.Entity.PROPERTY,
+        )
+        view = Attribute.objects.create(
+            name="supply_view",
+            display_name="چشم‌انداز",
+            data_type=Attribute.DataType.TEXT,
+            entity=Attribute.Entity.PROPERTY,
+        )
+        PropertyTypeAttribute.objects.create(
+            property_type=self.prop_type, attribute=parking, is_required=True
+        )
+        PropertyTypeAttribute.objects.create(property_type=self.prop_type, attribute=view)
+
+        self.auth(self.mgr1)
+        created = self.client.post(
+            "/crm/api/property-cases/",
+            {"contact_full_name": "مالک آزمون", "contact_phone": "09121112233", "description": "ملک با موقعیت"},
+            format="json",
+        )
+        self.assertEqual(created.status_code, 201, created.content)
+        case_id = created.data["id"]
+        assigned = self.client.post(
+            f"/crm/api/property-cases/{case_id}/assign/",
+            {"assigned_to": self.adv1.pk, "due_at": (timezone.now() + timedelta(days=2)).isoformat()},
+            format="json",
+        )
+        self.assertEqual(assigned.status_code, 200, assigned.content)
+
+        self.auth(self.adv1)
+        accepted = self.client.post(f"/crm/api/property-cases/{case_id}/accept_assignment/", {}, format="json")
+        self.assertEqual(accepted.status_code, 200, accepted.content)
+        workspace = {
+            "address": "تهران، جردن، خیابان آزمون",
+            "district": self.district.pk,
+            "property_type": "APARTMENT",
+            "property_type_ref": self.prop_type.pk,
+            "property_usage": self.prop_type.property_usage_id,
+            "latitude": "35.721900",
+            "longitude": "51.334700",
+            "attributes": {parking.name: True, view.name: "شهر"},
+            "area": 120,
+            "report_text": "گزارش کامل کارشناسی",
+            "is_complete": True,
+            "version": accepted.data["version"],
+        }
+        saved = self.client.post(
+            f"/crm/api/property-cases/{case_id}/save_workspace/", workspace, format="json"
+        )
+        self.assertEqual(saved.status_code, 200, saved.content)
+        prop = Property.objects.get(pk=saved.data["property_id"])
+        self.assertEqual(prop.district_id, self.district.pk)
+        self.assertEqual(prop.latitude, Decimal("35.721900"))
+        self.assertEqual(prop.longitude, Decimal("51.334700"))
+        self.assertEqual(prop.property_type_ref_id, self.prop_type.pk)
+        self.assertEqual(prop.property_usage_id, self.prop_type.property_usage_id)
+        self.assertIs(PropertyAttributeValue.objects.get(property=prop, attribute=parking).value, True)
+        self.assertEqual(PropertyAttributeValue.objects.get(property=prop, attribute=view).value, "شهر")
+        image_buffer = BytesIO()
+        Image.new("RGB", (2, 2), color=(20, 80, 120)).save(image_buffer, format="PNG")
+        image_bytes = image_buffer.getvalue()
+        with TemporaryDirectory() as media_root, override_settings(MEDIA_ROOT=media_root):
+            upload = self.client.post(
+                f"/properties/api/properties/{prop.pk}/images/",
+                {"images": SimpleUploadedFile("review-snapshot.png", image_bytes, content_type="image/png")},
+                format="multipart",
+                HTTP_IDEMPOTENCY_KEY="supply-review-image-1",
+            )
+            self.assertEqual(upload.status_code, 201, upload.content)
+            retried_upload = self.client.post(
+                f"/properties/api/properties/{prop.pk}/images/",
+                {"images": SimpleUploadedFile("review-snapshot.png", image_bytes, content_type="image/png")},
+                format="multipart",
+                HTTP_IDEMPOTENCY_KEY="supply-review-image-1",
+            )
+            self.assertEqual(retried_upload.status_code, 201, retried_upload.content)
+            self.assertEqual(retried_upload.data[0]["id"], upload.data[0]["id"])
+
+        image_id = upload.data[0]["id"]
+        self.assertEqual(prop.images.count(), 1)
+        submitted = self.client.post(
+            f"/crm/api/property-cases/{case_id}/submit_property_for_review/",
+            {"version": saved.data["version"]},
+            format="json",
+        )
+        self.assertEqual(submitted.status_code, 201, submitted.content)
+        snapshot = submitted.data["snapshot"]
+        self.assertEqual(snapshot["province_id"], self.district.city.province_id)
+        self.assertEqual(snapshot["city_id"], self.district.city_id)
+        self.assertEqual(snapshot["district_id"], self.district.pk)
+        self.assertEqual(snapshot["latitude"], "35.721900")
+        self.assertEqual(snapshot["longitude"], "51.334700")
+        self.assertEqual(snapshot["property_type_ref_id"], self.prop_type.pk)
+        self.assertEqual(snapshot["property_usage_id"], self.prop_type.property_usage_id)
+        snapshot_attrs = {item["name"]: item for item in snapshot["attributes"]}
+        self.assertEqual(snapshot_attrs[parking.name]["value"], True)
+        self.assertEqual(snapshot_attrs[parking.name]["display_value"], "بله")
+        self.assertEqual(snapshot_attrs[view.name]["value"], "شهر")
+        self.assertEqual(len(snapshot["images"]), 1)
+        self.assertEqual(snapshot["images"][0]["id"], image_id)
+        self.assertTrue(snapshot["images"][0]["url"])
+
+        locked_upload = self.client.post(
+            f"/properties/api/properties/{prop.pk}/images/", {}, format="multipart"
+        )
+        self.assertEqual(locked_upload.status_code, 409)
+        locked_edit = self.client.patch(
+            f"/properties/api/properties/{prop.pk}/", {"description": "تغییر پس از ارسال"}, format="json"
+        )
+        self.assertEqual(locked_edit.status_code, 400)
+
+    def test_submission_requires_required_dynamic_property_attributes(self):
+        required = Attribute.objects.create(
+            name="supply_required_floor",
+            display_name="تعداد طبقه",
+            data_type=Attribute.DataType.INTEGER,
+            entity=Attribute.Entity.PROPERTY,
+        )
+        PropertyTypeAttribute.objects.create(
+            property_type=self.prop_type, attribute=required, is_required=True
+        )
+        self.auth(self.mgr1)
+        created = self.client.post(
+            "/crm/api/property-cases/",
+            {"contact_full_name": "مالک دوم", "contact_phone": "09121112244", "description": "ملک"},
+            format="json",
+        )
+        case_id = created.data["id"]
+        self.client.post(
+            f"/crm/api/property-cases/{case_id}/assign/",
+            {"assigned_to": self.adv1.pk, "due_at": (timezone.now() + timedelta(days=2)).isoformat()},
+            format="json",
+        )
+        self.auth(self.adv1)
+        accepted = self.client.post(f"/crm/api/property-cases/{case_id}/accept_assignment/", {}, format="json")
+        saved = self.client.post(
+            f"/crm/api/property-cases/{case_id}/save_workspace/",
+            {
+                "address": "نشانی آزمون",
+                "district": self.district.pk,
+                "property_type_ref": self.prop_type.pk,
+                "area": 100,
+                "report_text": "گزارش کامل",
+                "is_complete": True,
+                "version": accepted.data["version"],
+            },
+            format="json",
+        )
+        self.assertEqual(saved.status_code, 200, saved.content)
+        rejected = self.client.post(
+            f"/crm/api/property-cases/{case_id}/submit_property_for_review/",
+            {"version": saved.data["version"]},
+            format="json",
+        )
+        self.assertEqual(rejected.status_code, 400)
+        self.assertIn("attributes", rejected.data)
