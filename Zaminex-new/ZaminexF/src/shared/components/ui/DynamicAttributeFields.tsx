@@ -180,7 +180,7 @@ function DynamicAttributeFields({
   if (!schema) return null;
 
   const fields = schema.fields.filter((f) => !f.isCore);
-  const facilities = schema.facilities;
+  const facilities = schema.facilities.filter((f) => !f.isCore);
 
   if (fields.length === 0 && facilities.length === 0) return null;
 

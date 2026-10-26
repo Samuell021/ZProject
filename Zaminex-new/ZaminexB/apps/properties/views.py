@@ -338,10 +338,12 @@ class PropertyViewSet(viewsets.ModelViewSet):
         if not is_admin and property_obj.status == Property.Status.DRAFT:
             _notify_property_pending_review(property_obj, user)
 
+    @transaction.atomic
     def perform_update(self, serializer):
         user = self.request.user
         is_admin = user_is_admin(user)
-        instance = serializer.instance
+        instance = Property.objects.select_for_update().get(pk=serializer.instance.pk)
+        serializer.instance = instance
         require_permission(user, "property.edit", "شما اجازه ویرایش ملک را ندارید.")
         if not can_manage_property(user, instance):
             raise PermissionDenied("شما اجازه ویرایش این ملک را ندارید.")

@@ -217,6 +217,14 @@ export function PropertyRegisterPage({
       districtName: district?.displayName,
     };
   }, [locationTree, draft.provinceId, draft.cityId, draft.districtId]);
+  const mapPoint = useMemo<[number, number] | null>(() => {
+    if (!draft.latitude.trim() || !draft.longitude.trim()) return null;
+    const latitude = Number(draft.latitude);
+    const longitude = Number(draft.longitude);
+    if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90) return null;
+    if (!Number.isFinite(longitude) || longitude < -180 || longitude > 180) return null;
+    return [latitude, longitude];
+  }, [draft.latitude, draft.longitude]);
 
   useEffect(() => {
     const previews = gallery.map((file) => ({ file, url: URL.createObjectURL(file) }));
@@ -372,6 +380,12 @@ export function PropertyRegisterPage({
 
   function updateAttribute(name: string, value: unknown) {
     updateDraft("attributes", { ...draft.attributes, [name]: value });
+    setFieldErrors((previous) => {
+      if (!(name in previous)) return previous;
+      const next = { ...previous };
+      delete next[name];
+      return next;
+    });
   }
 
   function addGalleryFiles(files: File[]) {
@@ -404,7 +418,7 @@ export function PropertyRegisterPage({
     const errors: Record<string, string> = {};
     const fields = [...(propertySchema?.fields || []), ...(propertySchema?.facilities || [])];
     for (const field of fields) {
-      if (!field.isRequired) continue;
+      if (field.isCore || !field.isRequired) continue;
       const value = draft.attributes[field.name];
       if (value == null || value === "" || (Array.isArray(value) && value.length === 0)) {
         errors[field.name] = `تکمیل «${field.displayName}» الزامی است.`;
@@ -548,6 +562,7 @@ export function PropertyRegisterPage({
       setFieldErrors(errs);
       return;
     }
+    setGalleryError("");
 
     setBusy(true);
     try {
@@ -1209,6 +1224,10 @@ export function PropertyRegisterPage({
                   setFieldErrors((previous) => {
                     const next = { ...previous };
                     delete next.propertyTypeRef;
+                    delete next.attributes;
+                    for (const field of [...(propertySchema?.fields || []), ...(propertySchema?.facilities || [])]) {
+                      delete next[field.name];
+                    }
                     return next;
                   });
                 }}
@@ -1291,19 +1310,22 @@ export function PropertyRegisterPage({
               cityId={draft.cityId}
               districtId={draft.districtId}
               onProvinceChange={(value) => {
-                setDraft((previous) => ({ ...previous, provinceId: value, cityId: "", districtId: "", neighborhood: "" }));
-                setFieldErrors((previous) => ({ ...previous, provinceId: "", cityId: "", districtId: "" }));
+                updateDraft("provinceId", value);
+                updateDraft("cityId", "");
+                updateDraft("districtId", "");
+                updateDraft("neighborhood", "");
               }}
               onCityChange={(value) => {
-                setDraft((previous) => ({ ...previous, cityId: value, districtId: "", neighborhood: "" }));
-                setFieldErrors((previous) => ({ ...previous, cityId: "", districtId: "" }));
+                updateDraft("cityId", value);
+                updateDraft("districtId", "");
+                updateDraft("neighborhood", "");
               }}
               onDistrictChange={(value) => {
                 const province = locationTree.find((item) => String(item.id) === draft.provinceId);
                 const city = province?.cities.find((item) => String(item.id) === draft.cityId);
                 const district = city?.districts.find((item) => String(item.id) === value);
-                setDraft((previous) => ({ ...previous, districtId: value, neighborhood: district?.displayName || "" }));
-                setFieldErrors((previous) => ({ ...previous, districtId: "" }));
+                updateDraft("districtId", value);
+                updateDraft("neighborhood", district?.displayName || "");
               }}
               errors={fieldErrors}
               required
@@ -1340,7 +1362,7 @@ export function PropertyRegisterPage({
               </Field>
             </div>
             <PropertyMapPicker
-              value={draft.latitude && draft.longitude ? [Number(draft.latitude), Number(draft.longitude)] : null}
+              value={mapPoint}
               onChange={(point) => {
                 updateDraft("latitude", String(point[0]));
                 updateDraft("longitude", String(point[1]));

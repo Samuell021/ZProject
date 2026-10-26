@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-10-26T20:16:43.671Z",
+  "generatedAt": "2026-10-26T20:35:04.660Z",
   "entry": "src/main.tsx",
   "sources": {
     "src/app/App.tsx": "bae4092125daa2eb7c2ac7c822f629762580dc32768924852ce906897607d0f4",
@@ -38,9 +38,9 @@
     "src/features/crm/pages/IntroductionsPage.tsx": "b0deefc604727088060dc1c125ad382eb9553cb227f604981bb4420523105bb6",
     "src/features/crm/pages/PipelinesPage.tsx": "ca0d24fc5f64b186a866cc5795a5a99a7cef793aa79bd95d9e49fe085d691fbf",
     "src/features/crm/pages/PropertyCasesPage.tsx": "5b33c3daed250e75fda1dcb79610b26ec3ba8a246c07ec9ee3848c035e19e5c5",
-    "src/features/crm/pages/PropertyRegisterPage.tsx": "1faa43814024599069693482871c4d673cf76da9c03cfc7cab9e0946739e9498",
+    "src/features/crm/pages/PropertyRegisterPage.tsx": "0165c3cd679f80ae48cfe232915271b5b3c84cbcaf519c738c4d4e3203003b4f",
     "src/features/crm/pages/ReportsPage.tsx": "1a4fd483377b97fb68f34cd5766a9682c9650e237117b185d6a7c4a4ec0a3b46",
-    "src/features/crm/pages/ReviewsQueuePage.tsx": "e966f1da25f9687149bc089b9ee6c84c54ce15b7e50c30bd44460e0e364f664a",
+    "src/features/crm/pages/ReviewsQueuePage.tsx": "782964b699c35bdeb692f36899db631ee812995e436b1bcb976a059740a80329",
     "src/features/crm/pages/ViewingsPage.tsx": "e1fc13e5777da6f472139f157846176e1777144363e5164a41ecc6daf903e45e",
     "src/features/dashboard/AdminDashboard.tsx": "35536bb8168e7a9cd2eb8d1c4bcdf573afc86c6cd3cad67f2f0ad2face16a436",
     "src/features/dashboard/CrmOperationsSummary.tsx": "e5fe676df823f2f45eb529283fc334e68f8a5d86e1514d5732499a9060194cdf",
@@ -103,7 +103,7 @@
     "src/shared/components/ui/DealTypeCombobox.tsx": "f7f5a24cd56b429f2198055527fed072bc4e529b88db5500a2b4646df7b81cc2",
     "src/shared/components/ui/DealTypeListCombobox.tsx": "4b90fd0f53965fca99c2323a4c464f6b625f234cdbe0ca6b3b90a6e2153c066c",
     "src/shared/components/ui/DistrictCombobox.tsx": "c90b707e30e45f4a587037e98c85c78ded5c1eb3836c1837ef5ce75856845c7a",
-    "src/shared/components/ui/DynamicAttributeFields.tsx": "2a6dd98f36ac9c04bc4f43fccf82421cefbc332661af5369ce919bdc21dbc3d3",
+    "src/shared/components/ui/DynamicAttributeFields.tsx": "b14c4adc8c7518c292d6a044f365d3fcaa2c46e68e2417fb88fed7323c430123",
     "src/shared/components/ui/DynamicSearchFilters.tsx": "39b17203dc559d6853adaa43d922ffa721ccd8e8f25f08d8c41b2d24193949ae",
     "src/shared/components/ui/EmptyChart.tsx": "bf512d8f5d05fe2cb34ac1776674498c67f687bb37913f6c87b921e464e73fd2",
     "src/shared/components/ui/EmptyState.tsx": "ceeb4a17a8b83acf358cd0476948fcd21080e3653b24585a49bbee98d676c447",

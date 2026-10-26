@@ -723,6 +723,28 @@ class SupplyPipelineTests(TestCase):
             "is_complete": True,
             "version": accepted.data["version"],
         }
+        invalid_coordinates = self.client.post(
+            f"/crm/api/property-cases/{case_id}/save_workspace/",
+            {**workspace, "longitude": None},
+            format="json",
+        )
+        self.assertEqual(invalid_coordinates.status_code, 400)
+        self.assertIn("coordinates", invalid_coordinates.data)
+        invalid_usage = self.client.post(
+            f"/crm/api/property-cases/{case_id}/save_workspace/",
+            {**workspace, "property_usage": self.prop_type.property_usage_id + 999},
+            format="json",
+        )
+        self.assertEqual(invalid_usage.status_code, 400)
+        self.assertIn("property_usage", invalid_usage.data)
+        unknown_attribute = self.client.post(
+            f"/crm/api/property-cases/{case_id}/save_workspace/",
+            {**workspace, "attributes": {"not_for_this_type": "x"}},
+            format="json",
+        )
+        self.assertEqual(unknown_attribute.status_code, 400)
+        self.assertIn("attributes", unknown_attribute.data)
+
         saved = self.client.post(
             f"/crm/api/property-cases/{case_id}/save_workspace/", workspace, format="json"
         )
@@ -787,6 +809,17 @@ class SupplyPipelineTests(TestCase):
             f"/properties/api/properties/{prop.pk}/", {"description": "تغییر پس از ارسال"}, format="json"
         )
         self.assertEqual(locked_edit.status_code, 400)
+        locked_workspace = self.client.post(
+            f"/crm/api/property-cases/{case_id}/save_workspace/",
+            {
+                "version": models.PropertyRegistrationRequest.objects.get(pk=case_id).version,
+                "address": "تغییر از مسیر کارشناسی پس از ارسال",
+            },
+            format="json",
+        )
+        self.assertEqual(locked_workspace.status_code, 400)
+        prop.refresh_from_db()
+        self.assertEqual(prop.address, workspace["address"])
 
     def test_submission_requires_required_dynamic_property_attributes(self):
         required = Attribute.objects.create(

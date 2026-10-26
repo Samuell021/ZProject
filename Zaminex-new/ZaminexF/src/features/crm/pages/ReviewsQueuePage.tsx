@@ -214,7 +214,7 @@ export function ReviewsQueuePage({ csrfToken, role, navigate, embedded }: CrmPag
                   <div className="space-y-1.5">
                     <strong className="text-foreground">موقعیت ثبت‌شده در نسخهٔ ارسالی</strong>
                     <div className="text-muted-foreground">
-                      {[snapshot.province_name, snapshot.city_name, snapshot.location_path].filter(Boolean).join(" / ") || item.property_district || "موقعیت ثبت نشده"}
+                      {snapshot.location_path || [snapshot.province_name, snapshot.city_name, item.property_district].filter(Boolean).join(" / ") || "موقعیت ثبت نشده"}
                     </div>
                     {snapshot.latitude != null && snapshot.longitude != null ? (
                       <div className="font-mono text-muted-foreground" dir="ltr">{snapshot.latitude}, {snapshot.longitude}</div>
