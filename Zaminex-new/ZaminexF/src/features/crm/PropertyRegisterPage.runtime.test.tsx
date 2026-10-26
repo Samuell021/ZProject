@@ -140,13 +140,46 @@ describe("property registration form upload and review ordering", () => {
       if (url.includes("/basics/api/catalog/")) {
         return new Response(JSON.stringify({
           usages: [{ id: 5, name: "residential", displayName: "مسکونی" }],
-          propertyTypes: [{ id: 6, name: "apartment", displayName: "آپارتمان", propertyUsage: 5, propertyUsageName: "مسکونی" }],
+          propertyTypes: [
+            { id: 6, name: "apartment", displayName: "آپارتمان", propertyUsage: 5, propertyUsageName: "مسکونی" },
+            { id: 7, name: "land", displayName: "زمین", propertyUsage: 5, propertyUsageName: "مسکونی" },
+          ],
           dealTypes: [],
         }), { status: 200, headers: { "Content-Type": "application/json" } });
       }
       if (url.includes("/basics/api/schema/property-form/")) {
+        const landSchema = url.includes("propertyType=7");
         return new Response(JSON.stringify({
-          fields: [
+          fields: landSchema ? [
+            {
+              id: 3,
+              name: "land_area",
+              displayName: "متراژ زمین",
+              dataType: "integer",
+              inputType: "default",
+              unit: "متر مربع",
+              isFacility: false,
+              isCore: false,
+              coreField: "",
+              isRequired: true,
+              sortOrder: 0,
+              options: [],
+            },
+            {
+              id: 4,
+              name: "frontage",
+              displayName: "بر زمین",
+              dataType: "decimal",
+              inputType: "default",
+              unit: "متر",
+              isFacility: false,
+              isCore: false,
+              coreField: "",
+              isRequired: false,
+              sortOrder: 1,
+              options: [],
+            },
+          ] : [
             {
               id: 1,
               name: "area",
@@ -232,6 +265,16 @@ describe("property registration form upload and review ordering", () => {
 
     await view.findByRole("heading", { name: /مرحلهٔ ۵: تکمیل مشخصات ملک/ });
     await waitFor(() => expect(view.getByRole("button", { name: "انتخاب استان" })).toBeTruthy());
+    await view.findByText("تعداد پارکینگ");
+
+    const propertyTypeSelect = view.getByLabelText("نوع مرجع ملک");
+    fireEvent.change(propertyTypeSelect, { target: { value: "7" } });
+    await view.findByText(/متراژ زمین/);
+    expect(view.queryByText("تعداد اتاق")).toBeNull();
+    expect(view.queryByText("طبقه")).toBeNull();
+    expect(view.queryByText("سال ساخت")).toBeNull();
+    fireEvent.change(propertyTypeSelect, { target: { value: "6" } });
+    await view.findByText("تعداد پارکینگ");
 
     fireEvent.click(view.getByRole("button", { name: "انتخاب استان" }));
     fireEvent.click(await view.findByRole("button", { name: "تهران" }));
@@ -285,7 +328,12 @@ describe("property registration form upload and review ordering", () => {
       property_usage: 5,
       latitude: 35.7219,
       longitude: 51.3347,
+      area: 120,
+      attributes: { parking_count: "1" },
     });
+    expect(workspacePayloads[0]).not.toHaveProperty("rooms");
+    expect(workspacePayloads[0]).not.toHaveProperty("floor");
+    expect(workspacePayloads[0]).not.toHaveProperty("built_year");
 
     uploadFails = false;
     fireEvent.click(view.getByRole("button", { name: "ذخیره و ارسال برای تأیید مدیر" }));

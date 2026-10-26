@@ -84,6 +84,18 @@ class SupplyPipelineTests(TestCase):
     def auth(self, user):
         self.client.force_authenticate(user=user)
 
+    def test_seeded_physical_features_are_only_core_for_shared_area(self):
+        from apps.basics.management.commands.seed_basics import ATTRIBUTES, TYPE_ATTRIBUTES
+
+        core_feature_names = {row[0] for row in ATTRIBUTES if row[7]}
+        self.assertEqual(core_feature_names, {"area"})
+        land_features = {name for name, _required in TYPE_ATTRIBUTES["land"]}
+        self.assertTrue({"land_area", "frontage"}.issubset(land_features))
+        self.assertTrue({"rooms", "floor", "built_year"}.isdisjoint(land_features))
+        for type_name in ("apartment", "villa", "office"):
+            linked_features = {name for name, _required in TYPE_ATTRIBUTES[type_name]}
+            self.assertTrue(linked_features.intersection({"rooms", "floor", "built_year"}))
+
     def test_lead_creation_by_advisor_vs_manager_and_scope_isolation(self):
         self.auth(self.adv1)
         bad = self.client.post(
@@ -686,10 +698,34 @@ class SupplyPipelineTests(TestCase):
             data_type=Attribute.DataType.TEXT,
             entity=Attribute.Entity.PROPERTY,
         )
+        rooms = Attribute.objects.create(
+            name="rooms",
+            display_name="تعداد اتاق",
+            data_type=Attribute.DataType.INTEGER,
+            entity=Attribute.Entity.PROPERTY,
+            is_core=False,
+        )
+        floor = Attribute.objects.create(
+            name="floor",
+            display_name="طبقه",
+            data_type=Attribute.DataType.INTEGER,
+            entity=Attribute.Entity.PROPERTY,
+            is_core=False,
+        )
+        built_year = Attribute.objects.create(
+            name="built_year",
+            display_name="سال ساخت",
+            data_type=Attribute.DataType.INTEGER,
+            entity=Attribute.Entity.PROPERTY,
+            is_core=False,
+        )
         PropertyTypeAttribute.objects.create(
             property_type=self.prop_type, attribute=parking, is_required=True
         )
         PropertyTypeAttribute.objects.create(property_type=self.prop_type, attribute=view)
+        PropertyTypeAttribute.objects.create(property_type=self.prop_type, attribute=rooms)
+        PropertyTypeAttribute.objects.create(property_type=self.prop_type, attribute=floor)
+        PropertyTypeAttribute.objects.create(property_type=self.prop_type, attribute=built_year)
 
         self.auth(self.mgr1)
         created = self.client.post(
@@ -717,7 +753,13 @@ class SupplyPipelineTests(TestCase):
             "property_usage": self.prop_type.property_usage_id,
             "latitude": "35.721900",
             "longitude": "51.334700",
-            "attributes": {parking.name: True, view.name: "شهر"},
+            "attributes": {
+                parking.name: True,
+                view.name: "شهر",
+                rooms.name: 3,
+                floor.name: 5,
+                built_year.name: 1403,
+            },
             "area": 120,
             "report_text": "گزارش کامل کارشناسی",
             "is_complete": True,
@@ -755,8 +797,12 @@ class SupplyPipelineTests(TestCase):
         self.assertEqual(prop.longitude, Decimal("51.334700"))
         self.assertEqual(prop.property_type_ref_id, self.prop_type.pk)
         self.assertEqual(prop.property_usage_id, self.prop_type.property_usage_id)
+        self.assertEqual((prop.rooms, prop.floor, prop.built_year), (3, 5, 1403))
         self.assertIs(PropertyAttributeValue.objects.get(property=prop, attribute=parking).value, True)
         self.assertEqual(PropertyAttributeValue.objects.get(property=prop, attribute=view).value, "شهر")
+        self.assertEqual(PropertyAttributeValue.objects.get(property=prop, attribute=rooms).value, 3)
+        self.assertEqual(PropertyAttributeValue.objects.get(property=prop, attribute=floor).value, 5)
+        self.assertEqual(PropertyAttributeValue.objects.get(property=prop, attribute=built_year).value, 1403)
         image_buffer = BytesIO()
         Image.new("RGB", (2, 2), color=(20, 80, 120)).save(image_buffer, format="PNG")
         image_bytes = image_buffer.getvalue()
@@ -797,6 +843,9 @@ class SupplyPipelineTests(TestCase):
         self.assertEqual(snapshot_attrs[parking.name]["value"], True)
         self.assertEqual(snapshot_attrs[parking.name]["display_value"], "بله")
         self.assertEqual(snapshot_attrs[view.name]["value"], "شهر")
+        self.assertEqual(snapshot_attrs[rooms.name]["value"], 3)
+        self.assertEqual(snapshot_attrs[floor.name]["value"], 5)
+        self.assertEqual(snapshot_attrs[built_year.name]["value"], 1403)
         self.assertEqual(len(snapshot["images"]), 1)
         self.assertEqual(snapshot["images"][0]["id"], image_id)
         self.assertTrue(snapshot["images"][0]["url"])

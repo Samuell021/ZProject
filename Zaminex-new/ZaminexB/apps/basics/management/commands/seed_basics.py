@@ -53,9 +53,9 @@ DEAL_TYPES = [
 
 ATTRIBUTES = [
     ("area", "متراژ", A.DECIMAL, F.RANGE_FAST, "متر مربع", E.PROPERTY, False, True, "area", 10),
-    ("rooms", "تعداد اتاق", A.INTEGER, F.RANGE, "عدد", E.PROPERTY, False, True, "rooms", 20),
-    ("floor", "طبقه", A.INTEGER, F.RANGE, "", E.PROPERTY, False, True, "floor", 30),
-    ("built_year", "سال ساخت", A.INTEGER, F.RANGE, "", E.PROPERTY, False, True, "built_year", 40),
+    ("rooms", "تعداد اتاق", A.INTEGER, F.RANGE, "عدد", E.PROPERTY, False, False, "", 20),
+    ("floor", "طبقه", A.INTEGER, F.RANGE, "", E.PROPERTY, False, False, "", 30),
+    ("built_year", "سال ساخت", A.INTEGER, F.RANGE, "", E.PROPERTY, False, False, "", 40),
     
     ("total_floors", "تعداد کل طبقات", A.INTEGER, F.RANGE, "", E.PROPERTY, False, False, "", 50),
     ("units_per_floor", "واحد در طبقه", A.INTEGER, F.EXACT, "", E.PROPERTY, False, False, "", 60),
@@ -276,6 +276,15 @@ class Command(BaseCommand):
                 },
                 force,
             )
+            # These four physical features have a fixed product contract:
+            # area is the only shared core field; the others are dynamic and
+            # are made available through each property's type-specific links.
+            if name in {"area", "rooms", "floor", "built_year"} and (
+                obj.is_core != is_core or obj.core_field != core_field
+            ):
+                obj.is_core = is_core
+                obj.core_field = core_field
+                obj.save(update_fields=["is_core", "core_field", "updated_at"])
             attrs[name] = obj
             created_total += created
         self.stdout.write(f"  ویژگی‌ها          : {len(attrs)}")

@@ -72,9 +72,6 @@ type AppraisalDraftState = {
   longitude: string;
   attributes: Record<string, unknown>;
   area: string;
-  rooms: string;
-  floor: string;
-  builtYear: string;
   reportText: string;
   visitNotes: string;
   documentStatus: string;
@@ -103,9 +100,6 @@ const EMPTY_DRAFT: AppraisalDraftState = {
   longitude: "",
   attributes: {},
   area: "",
-  rooms: "",
-  floor: "",
-  builtYear: "",
   reportText: "",
   visitNotes: "",
   documentStatus: "تک‌برگ",
@@ -344,9 +338,6 @@ export function PropertyRegisterPage({
           ? loadedProperty.attributes
           : {}) as Record<string, unknown>,
         area: loadedProperty?.area ? String(loadedProperty.area) : "",
-        rooms: loadedProperty?.beds != null ? String(loadedProperty.beds) : "",
-        floor: loadedProperty?.floor != null ? String(loadedProperty.floor) : "",
-        builtYear: loadedProperty?.constructionYear ? String(loadedProperty.constructionYear) : "",
         reportText: activeCase.appraisal?.report_text || "",
         visitNotes: activeCase.appraisal?.visit_notes || "",
         documentStatus: String(activeCase.appraisal?.findings?.document_status || "تک‌برگ"),
@@ -586,9 +577,6 @@ export function PropertyRegisterPage({
         longitude: draft.longitude.trim() ? Number(draft.longitude) : null,
         attributes: draft.attributes,
         area: draft.area ? Number(draft.area) : 0,
-        rooms: draft.rooms ? Number(draft.rooms) : 0,
-        floor: draft.floor ? Number(draft.floor) : null,
-        built_year: draft.builtYear ? Number(draft.builtYear) : null,
         report_text: draft.reportText.trim(),
         visit_notes: draft.visitNotes.trim(),
         findings: { document_status: draft.documentStatus },
@@ -1248,6 +1236,13 @@ export function PropertyRegisterPage({
                 className={`${inputCls} opacity-80`}
               />
             </Field>
+          </div>
+
+          <div className="space-y-3 rounded-xl border border-border p-3.5">
+            <div>
+              <h4 className="text-sm font-bold text-foreground">ویژگی‌های ملک</h4>
+              <p className="mt-1 text-xs text-muted-foreground">متراژ برای همهٔ انواع ملک مشترک است؛ سایر ویژگی‌ها بر اساس نوع مرجع انتخاب‌شده بارگذاری می‌شوند.</p>
+            </div>
             <Field label="متراژ به متر مربع (الزامی)">
               <input
                 type="number"
@@ -1258,40 +1253,6 @@ export function PropertyRegisterPage({
               />
               {fieldErrors.area ? <span className="mt-1 block text-xs text-destructive">{fieldErrors.area}</span> : null}
             </Field>
-            <Field label="تعداد اتاق">
-              <input
-                type="number"
-                min={0}
-                value={draft.rooms}
-                onChange={(e) => updateDraft("rooms", e.target.value)}
-                className={inputCls}
-              />
-            </Field>
-            <Field label="طبقه / سال ساخت">
-              <div className="grid grid-cols-2 gap-2">
-                <input
-                  type="number"
-                  value={draft.floor}
-                  onChange={(e) => updateDraft("floor", e.target.value)}
-                  placeholder="طبقه"
-                  className={inputCls}
-                />
-                <input
-                  type="number"
-                  value={draft.builtYear}
-                  onChange={(e) => updateDraft("builtYear", e.target.value)}
-                  placeholder="سال ساخت"
-                  className={inputCls}
-                />
-              </div>
-            </Field>
-          </div>
-
-          <div className="space-y-3 rounded-xl border border-border p-3.5">
-            <div>
-              <h4 className="text-sm font-bold text-foreground">ویژگی‌های وابسته به نوع ملک</h4>
-              <p className="mt-1 text-xs text-muted-foreground">ویژگی‌ها و امکانات بر اساس نوع مرجع انتخاب‌شده بارگذاری می‌شوند.</p>
-            </div>
             <DynamicAttributeFields
               schema={propertySchema}
               values={draft.attributes}

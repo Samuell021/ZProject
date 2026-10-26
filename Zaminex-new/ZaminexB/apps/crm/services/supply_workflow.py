@@ -553,6 +553,22 @@ def _sync_property_attributes(prop, property_type, payload):
     PropertySerializer().save_attribute_payload(prop, payload)
 
 
+def _sync_legacy_property_feature_columns(prop):
+    """Keep legacy searchable property columns in sync with dynamic values."""
+    values = {
+        item.attribute.name: item.value
+        for item in PropertyAttributeValue.objects.filter(
+            property=prop,
+            attribute__name__in=("rooms", "floor", "built_year"),
+            attribute__is_core=False,
+        ).select_related("attribute")
+    }
+    prop.rooms = int(values["rooms"]) if values.get("rooms") not in (None, "") else 0
+    prop.floor = int(values["floor"]) if values.get("floor") not in (None, "") else None
+    prop.built_year = int(values["built_year"]) if values.get("built_year") not in (None, "") else None
+    prop.save(update_fields=["rooms", "floor", "built_year", "updated_at"])
+
+
 def _validate_required_property_attributes(prop):
     property_type = prop.property_type_ref
     if property_type is None:
@@ -700,9 +716,12 @@ def save_workspace(case, user, data):
         raise ValidationError({"property_type": "نوع ملک معتبر نیست."})
 
     area = clean_int(data.get("area"), "area", minimum=0)
-    rooms = clean_int(data.get("rooms"), "rooms", minimum=0, maximum=100)
-    floor = clean_int(data.get("floor"), "floor", minimum=-10, maximum=200)
-    built_year = clean_int(data.get("built_year"), "built_year", minimum=0, maximum=3000)
+    dynamic_attributes_supplied = "attributes" in data
+    # Keep compatibility with older workspace clients, but the current CRM
+    # form stores these features in the type-specific dynamic attribute map.
+    rooms = None if dynamic_attributes_supplied else clean_int(data.get("rooms"), "rooms", minimum=0, maximum=100)
+    floor = None if dynamic_attributes_supplied else clean_int(data.get("floor"), "floor", minimum=-10, maximum=200)
+    built_year = None if dynamic_attributes_supplied else clean_int(data.get("built_year"), "built_year", minimum=0, maximum=3000)
 
     address = str(data.get("address") if "address" in data else (prop.address if prop else "")).strip()
     neighborhood = str(data.get("neighborhood") if "neighborhood" in data else (prop.neighborhood if prop else "")).strip()
@@ -742,12 +761,13 @@ def save_workspace(case, user, data):
         prop.property_usage_id = property_usage_id
         if area is not None:
             prop.area = area
-        if rooms is not None:
-            prop.rooms = rooms
-        if "floor" in data:
-            prop.floor = floor
-        if "built_year" in data:
-            prop.built_year = built_year
+        if not dynamic_attributes_supplied:
+            if rooms is not None:
+                prop.rooms = rooms
+            if "floor" in data:
+                prop.floor = floor
+            if "built_year" in data:
+                prop.built_year = built_year
         if "address" in data:
             prop.address = address
         if "district" in data:
@@ -775,6 +795,7 @@ def save_workspace(case, user, data):
 
     if "attributes" in data:
         _sync_property_attributes(prop, property_type_ref, data.get("attributes"))
+        _sync_legacy_property_feature_columns(prop)
 
     _sync_property_parties(prop, case, data, user)
 

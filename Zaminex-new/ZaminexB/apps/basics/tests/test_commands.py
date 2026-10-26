@@ -33,7 +33,24 @@ class SeedBasicsTests(TestCase):
                 "partnership": "PARTNERSHIP",
             },
         )
-        self.assertTrue(Attribute.objects.filter(name="rooms", is_core=True).exists())
+        self.assertEqual(
+            set(Attribute.objects.filter(is_core=True).values_list("name", flat=True)),
+            {"area"},
+        )
+        self.assertTrue(Attribute.objects.filter(name="rooms", is_core=False, core_field="").exists())
+
+    def test_seed_rerun_repairs_legacy_core_flags_without_force(self):
+        call_command("seed_basics", stdout=io.StringIO())
+        rooms = Attribute.objects.get(name="rooms")
+        rooms.is_core = True
+        rooms.core_field = "rooms"
+        rooms.save(update_fields=["is_core", "core_field"])
+
+        call_command("seed_basics", stdout=io.StringIO())
+
+        rooms.refresh_from_db()
+        self.assertFalse(rooms.is_core)
+        self.assertEqual(rooms.core_field, "")
 
     def test_rooms_reaches_apartment_but_not_land(self):
         call_command("seed_basics", stdout=io.StringIO())
