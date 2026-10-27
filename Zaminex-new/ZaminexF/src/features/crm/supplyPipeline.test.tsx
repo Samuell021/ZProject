@@ -263,6 +263,21 @@ describe("accessible nested modals and review queue UI", () => {
                 decision: "PENDING",
                 decision_display: "در انتظار بررسی",
                 reason: "",
+                snapshot: {
+                  title: "آپارتمان نسخهٔ اول",
+                  property_title: "عنوان snapshot",
+                  address: "نشانی snapshot",
+                  area: 145,
+                  province_name: "تهران",
+                  city_name: "تهران",
+                  location_path: "تهران / جردن",
+                  latitude: "35.721900",
+                  longitude: "51.334700",
+                  property_type_display: "آپارتمان مسکونی",
+                  property_usage_name: "مسکونی",
+                  attributes: [{ id: 1, name: "parking", display_name: "پارکینگ", value: true, display_value: "بله" }],
+                  images: [{ id: 701, sort_order: 0, url: "/media/snapshot.png" }],
+                },
               },
             ],
           }),
@@ -280,6 +295,11 @@ describe("accessible nested modals and review queue UI", () => {
 
     const mgrView = render(<ReviewsQueuePage csrfToken="tok" page="crm-reviews" role="range_manager" navigate={vi.fn()} />);
     expect(await mgrView.findByText(/هشدار تغییر نسخه پس از ارسال/)).toBeTruthy();
+    expect(mgrView.getByText("عنوان snapshot")).toBeTruthy();
+    expect(mgrView.getByText("نشانی snapshot")).toBeTruthy();
+    expect(mgrView.getByText("تهران / جردن")).toBeTruthy();
+    expect(mgrView.getByText("بله")).toBeTruthy();
+    expect(mgrView.getByAltText("تصویر ملک 701")).toBeTruthy();
 
     fireEvent.click(mgrView.getByRole("button", { name: "تأیید نهایی ملک" }));
     expect(mgrView.getByText(/تعیین عنوان مدیریتی ملک الزامی است/)).toBeTruthy();

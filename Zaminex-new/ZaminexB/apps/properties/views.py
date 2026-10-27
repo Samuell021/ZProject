@@ -338,13 +338,17 @@ class PropertyViewSet(viewsets.ModelViewSet):
         if not is_admin and property_obj.status == Property.Status.DRAFT:
             _notify_property_pending_review(property_obj, user)
 
+    @transaction.atomic
     def perform_update(self, serializer):
         user = self.request.user
         is_admin = user_is_admin(user)
-        instance = serializer.instance
+        instance = Property.objects.select_for_update().get(pk=serializer.instance.pk)
+        serializer.instance = instance
         require_permission(user, "property.edit", "شما اجازه ویرایش ملک را ندارید.")
         if not can_manage_property(user, instance):
             raise PermissionDenied("شما اجازه ویرایش این ملک را ندارید.")
+        if instance.review_status == Property.ReviewStatus.PENDING:
+            raise ValidationError({"review_status": "ملک در صف بررسی مدیر است و تا ثبت تصمیم، اطلاعات آن قفل است."})
 
         if is_admin:
             consultant = serializer.validated_data.get("consultant", instance.consultant)
@@ -583,6 +587,17 @@ class PropertyViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"], url_path="images")
     def upload_images(self, request, pk=None):
+        # Reuse the CRM command receipt so a retry after a lost response cannot
+        # attach the same image twice. Import locally to keep app imports acyclic.
+        from apps.crm.views import execute_idempotently
+
+        return execute_idempotently(
+            request,
+            "properties.images.upload",
+            lambda: self._upload_images_once(request, pk),
+        )
+
+    def _upload_images_once(self, request, pk=None):
         property_obj = self.get_object()
         if not has_permission(request.user, "property.edit"):
             return Response(
@@ -594,6 +609,8 @@ class PropertyViewSet(viewsets.ModelViewSet):
                 {"detail": "فقط مالک ملک یا مدیر می‌تواند تصویر اضافه کند."},
                 status=status.HTTP_403_FORBIDDEN,
             )
+        if property_obj.review_status == Property.ReviewStatus.PENDING:
+            return Response({"detail": "تصاویر ملک در زمان بررسی مدیر قفل هستند."}, status=status.HTTP_409_CONFLICT)
         files = request.FILES.getlist("images")
         if not files:
             return Response(
@@ -620,6 +637,8 @@ class PropertyViewSet(viewsets.ModelViewSet):
 
         with transaction.atomic():
             property_obj = Property.objects.select_for_update().get(pk=property_obj.pk)
+            if property_obj.review_status == Property.ReviewStatus.PENDING:
+                return Response({"detail": "تصاویر ملک در زمان بررسی مدیر قفل هستند."}, status=status.HTTP_409_CONFLICT)
             if property_obj.images.count() + len(files) > MAX_PROPERTY_IMAGES:
                 return Response(
                     {"detail": f"حداکثر {MAX_PROPERTY_IMAGES} تصویر برای هر ملک مجاز است."},
@@ -649,15 +668,20 @@ class PropertyViewSet(viewsets.ModelViewSet):
                 {"detail": "فقط مالک ملک یا مدیر می‌تواند تصویر را حذف کند."},
                 status=status.HTTP_403_FORBIDDEN,
             )
-        try:
-            image = PropertyImage.objects.get(pk=image_id, property=property_obj)
-        except PropertyImage.DoesNotExist:
-            return Response(
-                {"detail": "تصویر مورد نظر یافت نشد."},
-                status=404,
-            )
-        image.image.delete(save=False)
-        image.delete()
+        with transaction.atomic():
+            property_obj = Property.objects.select_for_update().get(pk=property_obj.pk)
+            if property_obj.review_status == Property.ReviewStatus.PENDING:
+                return Response({"detail": "تصاویر ملک در زمان بررسی مدیر قفل هستند."}, status=status.HTTP_409_CONFLICT)
+            try:
+                image = PropertyImage.objects.select_for_update().get(pk=image_id, property=property_obj)
+            except PropertyImage.DoesNotExist:
+                return Response(
+                    {"detail": "تصویر مورد نظر یافت نشد."},
+                    status=404,
+                )
+            image.image.delete(save=False)
+            image.delete()
+        invalidate_property_caches(property_obj)
         return Response(status=204)
 
     @action(detail=True, methods=["patch"], url_path="images-reorder")
@@ -680,15 +704,20 @@ class PropertyViewSet(viewsets.ModelViewSet):
                 status=400,
             )
         changed = 0
-        for item in order_data:
-            img_id = item.get("id")
-            sort_order = item.get("sort_order")
-            if img_id is None or sort_order is None:
-                continue
-            PropertyImage.objects.filter(
-                pk=img_id, property=property_obj
-            ).update(sort_order=sort_order)
-            changed += 1
+        with transaction.atomic():
+            property_obj = Property.objects.select_for_update().get(pk=property_obj.pk)
+            if property_obj.review_status == Property.ReviewStatus.PENDING:
+                return Response({"detail": "ترتیب تصاویر ملک در زمان بررسی مدیر قفل است."}, status=status.HTTP_409_CONFLICT)
+            for item in order_data:
+                if not isinstance(item, dict):
+                    continue
+                img_id = item.get("id")
+                sort_order = item.get("sort_order")
+                if img_id is None or sort_order is None:
+                    continue
+                changed += PropertyImage.objects.filter(
+                    pk=img_id, property=property_obj
+                ).update(sort_order=sort_order)
 
         if changed:
             invalidate_property_caches(property_obj)

@@ -94,6 +94,7 @@ export type PropertyCaseRecord = {
   description: string;
   desired_deal_type_ids?: number[];
   resulting_property?: number | null;
+  property_id?: number;
   resulting_property_code?: string;
   property_review_status?: string;
   appraisal?: PropertyAppraisalSummary | null;
@@ -130,6 +131,30 @@ export type PropertyReviewQueueItem = {
   reviewed_by_name?: string;
   reviewed_at?: string | null;
   reason: string;
+  snapshot?: {
+    title?: string | null;
+    property_title?: string | null;
+    address?: string | null;
+    neighborhood?: string | null;
+    district_id?: number | null;
+    area?: number | null;
+    rooms?: number | null;
+    floor?: number | null;
+    built_year?: number | null;
+    property_type?: string | null;
+    province_name?: string | null;
+    city_name?: string | null;
+    location_path?: string | null;
+    latitude?: string | null;
+    longitude?: string | null;
+    property_type_ref_id?: number | null;
+    property_type_display?: string | null;
+    property_type_ref_name?: string | null;
+    property_usage_id?: number | null;
+    property_usage_name?: string | null;
+    attributes?: Array<{ id: number; name: string; display_name: string; value: unknown; display_value: string }>;
+    images?: Array<{ id: number; sort_order: number; url: string }>;
+  };
 };
 
 export type WizardStepDefinition = {

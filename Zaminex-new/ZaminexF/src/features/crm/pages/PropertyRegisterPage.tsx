@@ -1,17 +1,25 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   Check,
   CheckCircle2,
   FolderSearch,
+  Image as ImageIcon,
   Lock,
+  MapPin,
   Plus,
   RotateCcw,
   Trash2,
+  Upload,
+  X,
 } from "lucide-react";
 import { Badge } from "../../../shared/components/ui/Badge";
 import { EmptyState } from "../../../shared/components/ui/EmptyState";
-import { useLocationTree } from "../../../shared/components/ui/LocationSelect";
+import { LocationSelect, findLocationPath, useLocationTree } from "../../../shared/components/ui/LocationSelect";
+import { DynamicAttributeFields } from "../../../shared/components/ui/DynamicAttributeFields";
+import { PropertyMapPicker } from "../../../shared/components/ui/PropertyMapPicker";
+import { apiErrorMessage, apiFetch, readJson } from "../../../shared/lib/apiClient";
+import { useAttributeSchema, useBasicsCatalog } from "../../../shared/lib/useAttributeSchema";
 import type { Role } from "../../../shared/lib/types";
 import { AccessibleModal } from "../components/AccessibleModal";
 import { Btn, Card, Field, SearchBar, Shell, inputCls } from "../components/CrmUIKit";
@@ -53,13 +61,17 @@ type AppraisalDraftState = {
   desiredDealTypes: number[];
   propertyTitle: string;
   districtId: string;
+  provinceId: string;
+  cityId: string;
   neighborhood: string;
   address: string;
   propertyType: string;
+  propertyTypeRef: string;
+  propertyUsageId: string;
+  latitude: string;
+  longitude: string;
+  attributes: Record<string, unknown>;
   area: string;
-  rooms: string;
-  floor: string;
-  builtYear: string;
   reportText: string;
   visitNotes: string;
   documentStatus: string;
@@ -77,28 +89,22 @@ const EMPTY_DRAFT: AppraisalDraftState = {
   desiredDealTypes: [],
   propertyTitle: "",
   districtId: "",
+  provinceId: "",
+  cityId: "",
   neighborhood: "",
   address: "",
   propertyType: "APARTMENT",
+  propertyTypeRef: "",
+  propertyUsageId: "",
+  latitude: "",
+  longitude: "",
+  attributes: {},
   area: "",
-  rooms: "",
-  floor: "",
-  builtYear: "",
   reportText: "",
   visitNotes: "",
   documentStatus: "تک‌برگ",
   isComplete: true,
   parties: [{ fullName: "", phone: "", role: "OWNER", sharePercent: "100", isPrimary: true }],
-};
-
-type LocationProvince = {
-  id: number;
-  displayName: string;
-  cities?: Array<{
-    id: number;
-    displayName: string;
-    districts?: Array<{ id: number; displayName: string }>;
-  }>;
 };
 
 type ExistingListingSummary = {
@@ -161,6 +167,11 @@ export function PropertyRegisterPage({
   const [viewedStepOverride, setViewedStepOverride] = useState<WizardStepKey | null>(null);
   const [draft, setDraft] = useState<AppraisalDraftState>(EMPTY_DRAFT);
   const [restoredDraftAt, setRestoredDraftAt] = useState<string>("");
+  const [gallery, setGallery] = useState<File[]>([]);
+  const [galleryError, setGalleryError] = useState("");
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const imageUploadKeys = useRef(new WeakMap<File, string>());
+  const [galleryPreviews, setGalleryPreviews] = useState<Array<{ file: File; url: string }>>([]);
 
   const [assigneeId, setAssigneeId] = useState("");
   const [dueAt, setDueAt] = useState("");
@@ -180,18 +191,61 @@ export function PropertyRegisterPage({
   const [formError, setFormError] = useState("");
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
 
-  const { tree: locationTree } = useLocationTree(csrfToken);
-  const districtOptions = useMemo(() => {
-    const out: Array<{ id: number; label: string }> = [];
-    for (const prov of (locationTree || []) as LocationProvince[]) {
-      for (const city of prov.cities || []) {
-        for (const dist of city.districts || []) {
-          out.push({ id: dist.id, label: `${dist.displayName} (${city.displayName})` });
-        }
-      }
+  const { tree: locationTree, loading: locationLoading } = useLocationTree(csrfToken);
+  const { catalog, loading: catalogLoading } = useBasicsCatalog(csrfToken);
+  const { schema: propertySchema, loading: schemaLoading } = useAttributeSchema(
+    "property",
+    draft.propertyTypeRef,
+    csrfToken,
+  );
+  const selectedPropertyType = catalog?.propertyTypes.find(
+    (item) => String(item.id) === draft.propertyTypeRef,
+  );
+  const selectedLocationNames = useMemo(() => {
+    const province = locationTree.find((item) => String(item.id) === draft.provinceId);
+    const city = province?.cities.find((item) => String(item.id) === draft.cityId);
+    const district = city?.districts.find((item) => String(item.id) === draft.districtId);
+    return {
+      provinceName: province?.displayName,
+      cityName: city?.displayName,
+      districtName: district?.displayName,
+    };
+  }, [locationTree, draft.provinceId, draft.cityId, draft.districtId]);
+  const mapPoint = useMemo<[number, number] | null>(() => {
+    if (!draft.latitude.trim() || !draft.longitude.trim()) return null;
+    const latitude = Number(draft.latitude);
+    const longitude = Number(draft.longitude);
+    if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90) return null;
+    if (!Number.isFinite(longitude) || longitude < -180 || longitude > 180) return null;
+    return [latitude, longitude];
+  }, [draft.latitude, draft.longitude]);
+
+  useEffect(() => {
+    const previews = gallery.map((file) => ({ file, url: URL.createObjectURL(file) }));
+    setGalleryPreviews(previews);
+    return () => previews.forEach(({ url }) => URL.revokeObjectURL(url));
+  }, [gallery]);
+
+  useEffect(() => {
+    if (!draft.propertyTypeRef && catalog?.propertyTypes.length) {
+      const first = catalog.propertyTypes[0];
+      setDraft((previous) => ({
+        ...previous,
+        propertyTypeRef: String(first.id),
+        propertyUsageId: String(first.propertyUsage ?? ""),
+      }));
     }
-    return out;
-  }, [locationTree]);
+  }, [catalog, draft.propertyTypeRef]);
+
+  useEffect(() => {
+    if (selectedPropertyType?.propertyUsage != null) {
+      setDraft((previous) =>
+        previous.propertyUsageId === String(selectedPropertyType.propertyUsage)
+          ? previous
+          : { ...previous, propertyUsageId: String(selectedPropertyType.propertyUsage) },
+      );
+    }
+  }, [selectedPropertyType]);
 
   useEffect(() => {
     if (recordId && recordId !== selectedCaseId) {
@@ -226,6 +280,8 @@ export function PropertyRegisterPage({
     [propId, activeCase?.version],
   );
   const loadedProperty = propId ? (propLoad.data[propDetailUrl] as Row | undefined) : undefined;
+  const existingImages = Array.isArray(loadedProperty?.images) ? loadedProperty.images as Array<{ id: number; url: string }> : [];
+  const existingImageCount = existingImages.length;
   const propertyListings = (propId ? propLoad.data[propListingsUrl] || [] : []) as ExistingListingSummary[];
 
   const serverStep = deriveWizardStage(activeCase);
@@ -238,12 +294,18 @@ export function PropertyRegisterPage({
 
   useEffect(() => {
     setViewedStepOverride(null);
+    setGallery([]);
+    setGalleryError("");
   }, [serverStep, selectedCaseId]);
 
   useEffect(() => {
     const saved = readSupplyDraft<AppraisalDraftState>(userKey, selectedCaseId || null);
     if (saved) {
-      setDraft({ ...EMPTY_DRAFT, ...saved.fields });
+      setDraft({
+        ...EMPTY_DRAFT,
+        ...saved.fields,
+        ...findLocationPath(locationTree, (saved.fields as Partial<AppraisalDraftState>).districtId),
+      });
       setRestoredDraftAt(saved.savedAt);
       return;
     }
@@ -264,13 +326,18 @@ export function PropertyRegisterPage({
         ...EMPTY_DRAFT,
         propertyTitle: activeCase.property_title || "",
         districtId: loadedProperty?.districtId ? String(loadedProperty.districtId) : "",
+        ...findLocationPath(locationTree, loadedProperty?.districtId),
         neighborhood: String(loadedProperty?.neighborhood || ""),
         address: String(loadedProperty?.address || loadedProperty?.fullAddress || ""),
         propertyType: String(loadedProperty?.type || "APARTMENT"),
+        propertyTypeRef: loadedProperty?.propertyTypeRef ? String(loadedProperty.propertyTypeRef) : "",
+        propertyUsageId: loadedProperty?.propertyUsage ? String(loadedProperty.propertyUsage) : "",
+        latitude: loadedProperty?.latitude != null ? String(loadedProperty.latitude) : "",
+        longitude: loadedProperty?.longitude != null ? String(loadedProperty.longitude) : "",
+        attributes: (loadedProperty?.attributes && typeof loadedProperty.attributes === "object"
+          ? loadedProperty.attributes
+          : {}) as Record<string, unknown>,
         area: loadedProperty?.area ? String(loadedProperty.area) : "",
-        rooms: loadedProperty?.beds != null ? String(loadedProperty.beds) : "",
-        floor: loadedProperty?.floor != null ? String(loadedProperty.floor) : "",
-        builtYear: loadedProperty?.constructionYear ? String(loadedProperty.constructionYear) : "",
         reportText: activeCase.appraisal?.report_text || "",
         visitNotes: activeCase.appraisal?.visit_notes || "",
         documentStatus: String(activeCase.appraisal?.findings?.document_status || "تک‌برگ"),
@@ -280,7 +347,7 @@ export function PropertyRegisterPage({
     } else {
       setDraft(EMPTY_DRAFT);
     }
-  }, [userKey, selectedCaseId, activeCase?.id, loadedProperty?.id]);
+  }, [userKey, selectedCaseId, activeCase?.id, loadedProperty?.id, locationTree]);
 
   function updateDraft<K extends keyof AppraisalDraftState>(key: K, value: AppraisalDraftState[K]) {
     setDraft((prev) => {
@@ -300,6 +367,55 @@ export function PropertyRegisterPage({
         return copy;
       });
     }
+  }
+
+  function updateAttribute(name: string, value: unknown) {
+    updateDraft("attributes", { ...draft.attributes, [name]: value });
+    setFieldErrors((previous) => {
+      if (!(name in previous)) return previous;
+      const next = { ...previous };
+      delete next[name];
+      return next;
+    });
+  }
+
+  function addGalleryFiles(files: File[]) {
+    setGalleryError("");
+    const existingKeys = new Set(gallery.map((file) => `${file.name}:${file.size}:${file.lastModified}`));
+    const accepted: File[] = [];
+    const errors: string[] = [];
+    for (const file of files) {
+      const extOk = /\.(jpe?g|png|webp)$/i.test(file.name);
+      const mimeOk = !file.type || ["image/jpeg", "image/png", "image/webp"].includes(file.type);
+      if (!extOk || !mimeOk) {
+        errors.push(`«${file.name}» فرمت مجاز ندارد.`);
+      } else if (file.size > 5 * 1024 * 1024) {
+        errors.push(`«${file.name}» بیش از ۵ مگابایت است.`);
+      } else if (existingKeys.has(`${file.name}:${file.size}:${file.lastModified}`)) {
+        errors.push(`«${file.name}» تکراری است.`);
+      } else {
+        existingKeys.add(`${file.name}:${file.size}:${file.lastModified}`);
+        accepted.push(file);
+      }
+    }
+    const remaining = Math.max(0, 30 - existingImageCount - gallery.length);
+    if (accepted.length > remaining) errors.push(`برای این ملک حداکثر ${remaining} تصویر دیگر مجاز است.`);
+    const clipped = accepted.slice(0, remaining);
+    if (clipped.length) setGallery((previous) => [...previous, ...clipped]);
+    if (errors.length) setGalleryError(errors.join(" "));
+  }
+
+  function validateDynamicAttributes() {
+    const errors: Record<string, string> = {};
+    const fields = [...(propertySchema?.fields || []), ...(propertySchema?.facilities || [])];
+    for (const field of fields) {
+      if (field.isCore || !field.isRequired) continue;
+      const value = draft.attributes[field.name];
+      if (value == null || value === "" || (Array.isArray(value) && value.length === 0)) {
+        errors[field.name] = `تکمیل «${field.displayName}» الزامی است.`;
+      }
+    }
+    return errors;
   }
 
   const currentDealType = useMemo(
@@ -414,14 +530,30 @@ export function PropertyRegisterPage({
     const errs: Record<string, string> = {};
     if (submitAfterSave) {
       if (!draft.address.trim()) errs.address = "نشانی دقیق ملک الزامی است.";
-      if (!draft.districtId) errs.districtId = "انتخاب منطقه الزامی است.";
+      if (!draft.provinceId) errs.provinceId = "انتخاب استان الزامی است.";
+      if (!draft.cityId) errs.cityId = "انتخاب شهر الزامی است.";
+      if (!draft.districtId) errs.districtId = "انتخاب محله الزامی است.";
+      if (catalog?.propertyTypes.length && !draft.propertyTypeRef) errs.propertyTypeRef = "انتخاب نوع مرجع ملک الزامی است.";
       if (!draft.area || Number(draft.area) <= 0) errs.area = "متراژ ملک باید عددی بزرگ‌تر از صفر باشد.";
       if (!draft.reportText.trim()) errs.reportText = "متن گزارش کارشناسی الزامی است.";
+      if (schemaLoading) errs.attributes = "لطفاً تا بارگذاری ویژگی‌های نوع ملک صبر کنید.";
+      Object.assign(errs, validateDynamicAttributes());
+    }
+    const hasLatitude = draft.latitude.trim() !== "";
+    const hasLongitude = draft.longitude.trim() !== "";
+    if (hasLatitude !== hasLongitude) {
+      errs.latitude = "برای ثبت موقعیت، هر دو مختصات عرض و طول را وارد کنید.";
+    } else if (hasLatitude && hasLongitude) {
+      const latitude = Number(draft.latitude);
+      const longitude = Number(draft.longitude);
+      if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90) errs.latitude = "عرض جغرافیایی معتبر نیست.";
+      if (!Number.isFinite(longitude) || longitude < -180 || longitude > 180) errs.longitude = "طول جغرافیایی معتبر نیست.";
     }
     if (Object.keys(errs).length > 0) {
       setFieldErrors(errs);
       return;
     }
+    setGalleryError("");
 
     setBusy(true);
     try {
@@ -439,10 +571,12 @@ export function PropertyRegisterPage({
         neighborhood: draft.neighborhood.trim(),
         district: draft.districtId ? Number(draft.districtId) : null,
         property_type: draft.propertyType,
+        property_type_ref: draft.propertyTypeRef ? Number(draft.propertyTypeRef) : null,
+        property_usage: draft.propertyUsageId ? Number(draft.propertyUsageId) : null,
+        latitude: draft.latitude.trim() ? Number(draft.latitude) : null,
+        longitude: draft.longitude.trim() ? Number(draft.longitude) : null,
+        attributes: draft.attributes,
         area: draft.area ? Number(draft.area) : 0,
-        rooms: draft.rooms ? Number(draft.rooms) : 0,
-        floor: draft.floor ? Number(draft.floor) : null,
-        built_year: draft.builtYear ? Number(draft.builtYear) : null,
         report_text: draft.reportText.trim(),
         visit_notes: draft.visitNotes.trim(),
         findings: { document_status: draft.documentStatus },
@@ -458,6 +592,42 @@ export function PropertyRegisterPage({
         `/crm/api/property-cases/${activeCase.id}/save_workspace/`,
         workspaceBody,
       )) as PropertyCaseRecord;
+
+      if (gallery.length > 0) {
+        const propertyId = String(saved.property_id ?? saved.resulting_property ?? "");
+        if (!propertyId) {
+          setFormError("ملک ذخیره شد اما شناسهٔ آن برای بارگذاری تصویر دریافت نشد؛ پرونده برای بررسی ارسال نشد.");
+          reload();
+          return;
+        }
+        for (const file of [...gallery]) {
+          const formData = new FormData();
+          formData.append("images", file);
+          let idempotencyKey = imageUploadKeys.current.get(file);
+          if (!idempotencyKey) {
+            idempotencyKey = typeof crypto !== "undefined" && "randomUUID" in crypto
+              ? crypto.randomUUID()
+              : `${file.name}:${file.size}:${file.lastModified}:${Math.random().toString(36).slice(2)}`;
+            imageUploadKeys.current.set(file, idempotencyKey);
+          }
+          try {
+            const response = await apiFetch(
+              `/properties/api/properties/${propertyId}/images/`,
+              { method: "POST", body: formData, headers: { "Idempotency-Key": idempotencyKey } },
+              csrfToken,
+            );
+            const responseData = await readJson(response);
+            if (!response.ok) throw new Error(apiErrorMessage(responseData, "بارگذاری تصویر ناموفق بود."));
+            setGallery((previous) => previous.filter((queued) => queued !== file));
+          } catch (err) {
+            setGalleryError(err instanceof Error ? err.message : "بارگذاری تصاویر کامل نشد.");
+            setFeedback("اطلاعات کارشناسی ذخیره شد، اما همهٔ تصاویر بارگذاری نشدند. تصویرهای باقی‌مانده را دوباره بارگذاری کنید؛ پرونده هنوز برای بررسی مدیر ارسال نشده است.");
+            reload();
+            propLoad.reload();
+            return;
+          }
+        }
+      }
 
       if (submitAfterSave) {
         const reviewResp = (await post(
@@ -1030,34 +1200,49 @@ export function PropertyRegisterPage({
                 className={`${inputCls} ${!isManager ? "opacity-70" : ""}`}
               />
             </Field>
-            <Field label="منطقه (الزامی)">
+            <Field label="نوع مرجع ملک">
               <select
-                value={draft.districtId}
-                onChange={(e) => updateDraft("districtId", e.target.value)}
+                value={draft.propertyTypeRef}
+                disabled={catalogLoading || !catalog?.propertyTypes.length}
+                onChange={(e) => {
+                  const type = catalog?.propertyTypes.find((item) => String(item.id) === e.target.value);
+                  updateDraft("propertyTypeRef", e.target.value);
+                  updateDraft("propertyUsageId", String(type?.propertyUsage ?? ""));
+                  updateDraft("attributes", {});
+                  setFieldErrors((previous) => {
+                    const next = { ...previous };
+                    delete next.propertyTypeRef;
+                    delete next.attributes;
+                    for (const field of [...(propertySchema?.fields || []), ...(propertySchema?.facilities || [])]) {
+                      delete next[field.name];
+                    }
+                    return next;
+                  });
+                }}
                 className={inputCls}
               >
-                <option value="">انتخاب منطقه</option>
-                {districtOptions.map((d) => (
-                  <option key={d.id} value={String(d.id)}>
-                    {d.label}
-                  </option>
+                <option value="">{catalogLoading ? "در حال بارگذاری انواع ملک…" : "انتخاب نوع ملک"}</option>
+                {(catalog?.propertyTypes || []).map((type) => (
+                  <option key={type.id} value={String(type.id)}>{type.displayName}</option>
                 ))}
               </select>
-              {fieldErrors.districtId ? <span className="mt-1 block text-xs text-destructive">{fieldErrors.districtId}</span> : null}
+              {fieldErrors.propertyTypeRef ? <span className="mt-1 block text-xs text-destructive">{fieldErrors.propertyTypeRef}</span> : null}
             </Field>
-            <Field label="نوع ملک">
-              <select
-                value={draft.propertyType}
-                onChange={(e) => updateDraft("propertyType", e.target.value)}
-                className={inputCls}
-              >
-                <option value="APARTMENT">آپارتمان</option>
-                <option value="VILLA">ویلایی</option>
-                <option value="OFFICE">اداری</option>
-                <option value="COMMERCIAL">تجاری</option>
-                <option value="LAND">زمین / کلنگی</option>
-              </select>
+            <Field label="کاربری">
+              <input
+                readOnly
+                value={selectedPropertyType?.propertyUsageName || catalog?.usages.find((item) => String(item.id) === draft.propertyUsageId)?.displayName || ""}
+                placeholder="بر اساس نوع ملک تعیین می‌شود"
+                className={`${inputCls} opacity-80`}
+              />
             </Field>
+          </div>
+
+          <div className="space-y-3 rounded-xl border border-border p-3.5">
+            <div>
+              <h4 className="text-sm font-bold text-foreground">ویژگی‌های ملک</h4>
+              <p className="mt-1 text-xs text-muted-foreground">متراژ برای همهٔ انواع ملک مشترک است؛ سایر ویژگی‌ها بر اساس نوع مرجع انتخاب‌شده بارگذاری می‌شوند.</p>
+            </div>
             <Field label="متراژ به متر مربع (الزامی)">
               <input
                 type="number"
@@ -1068,33 +1253,45 @@ export function PropertyRegisterPage({
               />
               {fieldErrors.area ? <span className="mt-1 block text-xs text-destructive">{fieldErrors.area}</span> : null}
             </Field>
-            <Field label="تعداد اتاق">
-              <input
-                type="number"
-                min={0}
-                value={draft.rooms}
-                onChange={(e) => updateDraft("rooms", e.target.value)}
-                className={inputCls}
-              />
-            </Field>
-            <Field label="طبقه / سال ساخت">
-              <div className="grid grid-cols-2 gap-2">
-                <input
-                  type="number"
-                  value={draft.floor}
-                  onChange={(e) => updateDraft("floor", e.target.value)}
-                  placeholder="طبقه"
-                  className={inputCls}
-                />
-                <input
-                  type="number"
-                  value={draft.builtYear}
-                  onChange={(e) => updateDraft("builtYear", e.target.value)}
-                  placeholder="سال ساخت"
-                  className={inputCls}
-                />
-              </div>
-            </Field>
+            <DynamicAttributeFields
+              schema={propertySchema}
+              values={draft.attributes}
+              onChange={updateAttribute}
+              errors={fieldErrors}
+              loading={schemaLoading}
+            />
+            {fieldErrors.attributes ? <span className="block text-xs text-destructive">{fieldErrors.attributes}</span> : null}
+          </div>
+
+          <div className="space-y-2">
+            <span className="block text-sm text-muted-foreground">موقعیت سلسله‌مراتبی ملک (استان، شهر و محله)</span>
+            <LocationSelect
+              tree={locationTree}
+              provinceId={draft.provinceId}
+              cityId={draft.cityId}
+              districtId={draft.districtId}
+              onProvinceChange={(value) => {
+                updateDraft("provinceId", value);
+                updateDraft("cityId", "");
+                updateDraft("districtId", "");
+                updateDraft("neighborhood", "");
+              }}
+              onCityChange={(value) => {
+                updateDraft("cityId", value);
+                updateDraft("districtId", "");
+                updateDraft("neighborhood", "");
+              }}
+              onDistrictChange={(value) => {
+                const province = locationTree.find((item) => String(item.id) === draft.provinceId);
+                const city = province?.cities.find((item) => String(item.id) === draft.cityId);
+                const district = city?.districts.find((item) => String(item.id) === value);
+                updateDraft("districtId", value);
+                updateDraft("neighborhood", district?.displayName || "");
+              }}
+              errors={fieldErrors}
+              required
+            />
+            {locationLoading ? <span className="text-xs text-muted-foreground">در حال بارگذاری درخت مکان…</span> : null}
           </div>
 
           <Field label="نشانی دقیق ملک (محرمانه در سامانهٔ داخلی — الزامی)">
@@ -1106,6 +1303,93 @@ export function PropertyRegisterPage({
             />
             {fieldErrors.address ? <span className="mt-1 block text-xs text-destructive">{fieldErrors.address}</span> : null}
           </Field>
+
+          <section className="space-y-3 rounded-xl border border-border p-3.5">
+            <div className="flex items-start gap-2">
+              <MapPin size={16} className="mt-0.5 text-primary" />
+              <div>
+                <h4 className="text-sm font-bold text-foreground">مختصات دقیق روی نقشه (اختیاری)</h4>
+                <p className="mt-1 text-xs text-muted-foreground">نقطه را روی نقشه انتخاب کنید یا مختصات را وارد کنید. نشانی و مختصات دقیق فقط برای کاربران مجاز داخلی است.</p>
+              </div>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Field label="عرض جغرافیایی">
+                <input value={draft.latitude} onChange={(e) => updateDraft("latitude", e.target.value)} inputMode="decimal" placeholder="مثال: 35.7219" className={inputCls} />
+                {fieldErrors.latitude ? <span className="mt-1 block text-xs text-destructive">{fieldErrors.latitude}</span> : null}
+              </Field>
+              <Field label="طول جغرافیایی">
+                <input value={draft.longitude} onChange={(e) => updateDraft("longitude", e.target.value)} inputMode="decimal" placeholder="مثال: 51.3347" className={inputCls} />
+                {fieldErrors.longitude ? <span className="mt-1 block text-xs text-destructive">{fieldErrors.longitude}</span> : null}
+              </Field>
+            </div>
+            <PropertyMapPicker
+              value={mapPoint}
+              onChange={(point) => {
+                updateDraft("latitude", String(point[0]));
+                updateDraft("longitude", String(point[1]));
+              }}
+              provinceName={selectedLocationNames.provinceName}
+              cityName={selectedLocationNames.cityName}
+              districtName={selectedLocationNames.districtName}
+              csrfToken={csrfToken}
+            />
+          </section>
+
+          <section className="space-y-3 rounded-xl border border-border p-3.5">
+            <div className="flex items-start gap-2">
+              <ImageIcon size={16} className="mt-0.5 text-primary" />
+              <div>
+                <h4 className="text-sm font-bold text-foreground">تصاویر ملک</h4>
+                <p className="mt-1 text-xs text-muted-foreground">JPEG، PNG یا WebP؛ حداکثر ۵ مگابایت برای هر تصویر و ۳۰ تصویر برای هر ملک. تصاویر پیش از ارسال برای بررسی مدیر بارگذاری می‌شوند.</p>
+              </div>
+            </div>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/jpeg,image/png,image/webp"
+              multiple
+              className="hidden"
+              onChange={(event) => {
+                addGalleryFiles(Array.from(event.target.files || []));
+                event.currentTarget.value = "";
+              }}
+            />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              onDragOver={(event) => event.preventDefault()}
+              onDrop={(event) => { event.preventDefault(); addGalleryFiles(Array.from(event.dataTransfer.files || [])); }}
+              className="flex w-full items-center justify-center gap-2 rounded-xl border border-dashed border-border px-4 py-5 text-sm font-semibold hover:border-primary hover:bg-primary/5"
+            >
+              <Upload size={16} /> افزودن تصویر
+            </button>
+            {galleryError ? <p role="alert" className="text-xs text-destructive">{galleryError}</p> : null}
+            {existingImages.length ? (
+              <div>
+                <p className="mb-2 text-xs font-semibold text-muted-foreground">تصاویر ذخیره‌شدهٔ ملک ({existingImages.length})</p>
+                <div className="grid grid-cols-3 gap-2 sm:grid-cols-5">
+                  {existingImages.map((image) => (
+                    <a key={image.id} href={image.url} target="_blank" rel="noreferrer" className="block aspect-square overflow-hidden rounded-lg bg-secondary">
+                      <img src={image.url} alt={`تصویر ذخیره‌شدهٔ ملک ${image.id}`} className="h-full w-full object-cover" />
+                    </a>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+            {galleryPreviews.length ? (
+              <div className="grid grid-cols-3 gap-2 sm:grid-cols-5">
+                {galleryPreviews.map(({ file, url }) => (
+                  <div key={`${file.name}:${file.size}:${file.lastModified}`} className="group relative aspect-square overflow-hidden rounded-lg bg-secondary">
+                    <img src={url} alt={`پیش‌نمایش ${file.name}`} className="h-full w-full object-cover" />
+                    <button type="button" aria-label={`حذف ${file.name}`} onClick={() => setGallery((previous) => previous.filter((item) => item !== file))} className="absolute right-1 top-1 rounded-full bg-background/90 p-1 text-destructive">
+                      <X size={13} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            <p className="text-xs text-muted-foreground">در صف بارگذاری: {gallery.length} تصویر؛ بارگذاری موفق از صف حذف می‌شود تا در تلاش مجدد دوباره ثبت نشود.</p>
+          </section>
 
           <div className="space-y-2 rounded-xl border p-3.5">
             <div className="flex items-center justify-between">

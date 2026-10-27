@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import transaction
@@ -14,12 +14,12 @@ from rest_framework.exceptions import APIException
 
 from apps.accounts.models import SalesRange, User
 from apps.accounts.permissions import has_permission, require_permission, user_is_general_manager
-from apps.basics.models import DealType, DealTypeVersion, District, PropertyType, PropertyUsage
+from apps.basics.models import Attribute, DealType, DealTypeVersion, District, PropertyType, PropertyUsage
 from apps.basics.terms import validate_terms
 from apps.listings.models import PropertyFile, PropertyFilePriceHistory
 from apps.notifications.models import Notification
 from apps.notifications.services import notify_users
-from apps.properties.models import Property
+from apps.properties.models import Property, PropertyAttributeValue
 from apps.tasks.models import Task
 
 from .. import models
@@ -502,10 +502,120 @@ def _sync_property_parties(prop, case, data, actor):
         prop.__dict__.pop("_primary_owner_contact", None)
 
 
+def _coordinate_value(raw, field, minimum, maximum):
+    if raw in (None, ""):
+        return None
+    try:
+        value = Decimal(str(raw).strip())
+    except (InvalidOperation, TypeError, ValueError):
+        raise ValidationError({field: "مختصات باید عدد معتبر باشد."})
+    if not value.is_finite() or value < minimum or value > maximum:
+        raise ValidationError({field: "مختصات خارج از بازهٔ مجاز است."})
+    try:
+        return value.quantize(Decimal("0.000001"))
+    except InvalidOperation:
+        raise ValidationError({field: "دقت مختصات معتبر نیست."})
+
+
+def _sync_property_attributes(prop, property_type, payload):
+    if not isinstance(payload, dict):
+        raise ValidationError({"attributes": "ویژگی‌های ملک باید به شکل شیء کلید/مقدار ارسال شوند."})
+
+    from apps.properties.serializers import PropertySerializer
+
+    links = []
+    if property_type is not None:
+        links = list(
+            property_type.attribute_links.filter(
+                is_active=True,
+                attribute__is_active=True,
+                attribute__deleted_at__isnull=True,
+                attribute__entity=Attribute.Entity.PROPERTY,
+                attribute__is_core=False,
+            ).select_related("attribute")
+        )
+    allowed = {link.attribute.name: link.attribute for link in links}
+    unknown = [name for name in payload if name not in allowed]
+    if unknown:
+        raise ValidationError({"attributes": f"ویژگی‌ها با نوع ملک انتخاب‌شده سازگار نیستند: {'، '.join(unknown)}"})
+
+    # The workspace sends a complete schema-shaped value set. Drop stale values
+    # from a previous type and omitted optional values, then use the canonical
+    # Property serializer's typed validation/storage implementation.
+    PropertyAttributeValue.objects.filter(property=prop).exclude(
+        attribute_id__in=[attribute.pk for attribute in allowed.values()]
+    ).delete()
+    retained_names = list(payload.keys())
+    omitted = PropertyAttributeValue.objects.filter(property=prop)
+    if retained_names:
+        omitted = omitted.exclude(attribute__name__in=retained_names)
+    omitted.delete()
+    PropertySerializer().save_attribute_payload(prop, payload)
+
+
+def _sync_legacy_property_feature_columns(prop):
+    """Keep legacy searchable property columns in sync with dynamic values."""
+    values = {
+        item.attribute.name: item.value
+        for item in PropertyAttributeValue.objects.filter(
+            property=prop,
+            attribute__name__in=("rooms", "floor", "built_year"),
+            attribute__is_core=False,
+        ).select_related("attribute")
+    }
+    prop.rooms = int(values["rooms"]) if values.get("rooms") not in (None, "") else 0
+    prop.floor = int(values["floor"]) if values.get("floor") not in (None, "") else None
+    prop.built_year = int(values["built_year"]) if values.get("built_year") not in (None, "") else None
+    prop.save(update_fields=["rooms", "floor", "built_year", "updated_at"])
+
+
+def _validate_required_property_attributes(prop):
+    property_type = prop.property_type_ref
+    if property_type is None:
+        return
+    required_links = property_type.attribute_links.filter(
+        is_active=True,
+        is_required=True,
+        attribute__is_active=True,
+        attribute__deleted_at__isnull=True,
+        attribute__is_core=False,
+    ).select_related("attribute")
+    missing = []
+    for link in required_links:
+        value = PropertyAttributeValue.objects.filter(
+            property=prop, attribute=link.attribute
+        ).first()
+        if value is None or value.value in (None, "", []):
+            missing.append(link.attribute.display_name)
+    if missing:
+        raise ValidationError({"attributes": f"تکمیل ویژگی‌های الزامی نوع ملک لازم است: {'، '.join(missing)}"})
+
+
+def _attribute_review_snapshot(prop):
+    values = []
+    for item in prop.attribute_values.select_related("attribute").order_by("attribute__sort_order"):
+        raw = item.value
+        if isinstance(raw, Decimal):
+            raw = str(raw)
+        elif hasattr(raw, "isoformat"):
+            raw = raw.isoformat()
+        values.append({
+            "id": item.attribute_id,
+            "name": item.attribute.name,
+            "display_name": item.attribute.display_name,
+            "value": raw,
+            "display_value": item.display_value,
+        })
+    return values
+
+
 @transaction.atomic
 def save_workspace(case, user, data):
     from . import can_manage_sales_range
 
+    case = models.PropertyRegistrationRequest.objects.select_for_update().select_related(
+        "resulting_property"
+    ).get(pk=case.pk)
     ensure_case_version(case, data)
     allowed = (
         user_is_general_manager(user)
@@ -547,29 +657,71 @@ def save_workspace(case, user, data):
             raise ValidationError({field: f"مقدار باید کوچک‌تر یا مساوی {maximum} باشد."})
         return num
 
-    district_raw = data.get("district")
-    district_id = clean_int(district_raw, "district", minimum=1) if district_raw not in (None, "") else (prop.district_id if prop else None)
-    if district_id is not None and not District.objects.filter(pk=district_id).exists():
-        raise ValidationError({"district": "منطقه انتخاب‌شده وجود ندارد."})
+    if "district" in data:
+        district_raw = data.get("district")
+        district_id = clean_int(district_raw, "district", minimum=1) if district_raw not in (None, "") else None
+    else:
+        district_id = prop.district_id if prop else None
+    district_obj = None
+    if district_id is not None:
+        district_obj = District.objects.select_related("city__province").filter(pk=district_id).first()
+        if district_obj is None:
+            raise ValidationError({"district": "محلهٔ انتخاب‌شده وجود ندارد."})
+        if not district_obj.is_active or not district_obj.city_id or not district_obj.city.is_active or not district_obj.city.province.is_active:
+            raise ValidationError({"district": "محله باید به شهر و استان فعال متصل باشد."})
 
-    type_ref_raw = data.get("property_type_ref")
-    property_type_ref_id = clean_int(type_ref_raw, "property_type_ref", minimum=1) if type_ref_raw not in (None, "") else (prop.property_type_ref_id if prop else None)
-    if property_type_ref_id is not None and not PropertyType.objects.filter(pk=property_type_ref_id).exists():
-        raise ValidationError({"property_type_ref": "نوع ملک انتخاب‌شده وجود ندارد."})
+    if "property_type_ref" in data:
+        type_ref_raw = data.get("property_type_ref")
+        property_type_ref_id = clean_int(type_ref_raw, "property_type_ref", minimum=1) if type_ref_raw not in (None, "") else None
+    else:
+        property_type_ref_id = prop.property_type_ref_id if prop else None
+    property_type_ref = None
+    if property_type_ref_id is not None:
+        property_type_ref = PropertyType.objects.select_related("property_usage").filter(
+            pk=property_type_ref_id, is_active=True
+        ).first()
+        if property_type_ref is None:
+            raise ValidationError({"property_type_ref": "نوع ملک انتخاب‌شده فعال یا معتبر نیست."})
 
-    usage_raw = data.get("property_usage")
-    property_usage_id = clean_int(usage_raw, "property_usage", minimum=1) if usage_raw not in (None, "") else (prop.property_usage_id if prop else None)
-    if property_usage_id is not None and not PropertyUsage.objects.filter(pk=property_usage_id).exists():
-        raise ValidationError({"property_usage": "کاربری انتخاب‌شده وجود ندارد."})
+    if "property_usage" in data:
+        usage_raw = data.get("property_usage")
+        property_usage_id = clean_int(usage_raw, "property_usage", minimum=1) if usage_raw not in (None, "") else None
+    else:
+        property_usage_id = prop.property_usage_id if prop else None
+    if property_type_ref is not None:
+        if property_usage_id not in (None, property_type_ref.property_usage_id):
+            raise ValidationError({"property_usage": "کاربری باید با نوع مرجع ملک انتخاب‌شده مطابقت داشته باشد."})
+        property_usage_id = property_type_ref.property_usage_id
+    if property_usage_id is not None and not PropertyUsage.objects.filter(pk=property_usage_id, is_active=True).exists():
+        raise ValidationError({"property_usage": "کاربری انتخاب‌شده فعال یا معتبر نیست."})
+
+    latitude_raw = data.get("latitude") if "latitude" in data else (prop.latitude if prop else None)
+    longitude_raw = data.get("longitude") if "longitude" in data else (prop.longitude if prop else None)
+    if (latitude_raw in (None, "")) != (longitude_raw in (None, "")):
+        raise ValidationError({"coordinates": "عرض و طول جغرافیایی باید با هم ثبت یا با هم خالی شوند."})
+    latitude = _coordinate_value(latitude_raw, "latitude", Decimal("-90"), Decimal("90"))
+    longitude = _coordinate_value(longitude_raw, "longitude", Decimal("-180"), Decimal("180"))
+    if latitude is not None and longitude is not None:
+        duplicate_coords = Property.objects.filter(latitude=latitude, longitude=longitude)
+        if prop is not None:
+            duplicate_coords = duplicate_coords.exclude(pk=prop.pk)
+        if duplicate_coords.exists():
+            raise ValidationError({"latitude": "این مختصات برای ملک دیگری ثبت شده است."})
 
     property_type = str(data.get("property_type") or (prop.property_type if prop else Property.PropertyType.APARTMENT)).strip().upper()
+    if property_type_ref is not None:
+        from apps.properties.serializers import LEGACY_TYPE_BY_NAME
+        property_type = LEGACY_TYPE_BY_NAME.get(property_type_ref.name.lower(), property_type)
     if property_type not in Property.PropertyType.values:
         raise ValidationError({"property_type": "نوع ملک معتبر نیست."})
 
     area = clean_int(data.get("area"), "area", minimum=0)
-    rooms = clean_int(data.get("rooms"), "rooms", minimum=0, maximum=100)
-    floor = clean_int(data.get("floor"), "floor", minimum=-10, maximum=200)
-    built_year = clean_int(data.get("built_year"), "built_year", minimum=0, maximum=3000)
+    dynamic_attributes_supplied = "attributes" in data
+    # Keep compatibility with older workspace clients, but the current CRM
+    # form stores these features in the type-specific dynamic attribute map.
+    rooms = None if dynamic_attributes_supplied else clean_int(data.get("rooms"), "rooms", minimum=0, maximum=100)
+    floor = None if dynamic_attributes_supplied else clean_int(data.get("floor"), "floor", minimum=-10, maximum=200)
+    built_year = None if dynamic_attributes_supplied else clean_int(data.get("built_year"), "built_year", minimum=0, maximum=3000)
 
     address = str(data.get("address") if "address" in data else (prop.address if prop else "")).strip()
     neighborhood = str(data.get("neighborhood") if "neighborhood" in data else (prop.neighborhood if prop else "")).strip()
@@ -593,6 +745,8 @@ def save_workspace(case, user, data):
             built_year=built_year,
             address=address,
             district_id=district_id,
+            latitude=latitude,
+            longitude=longitude,
             neighborhood=neighborhood,
             description=prop_desc,
             status=Property.Status.DRAFT,
@@ -607,16 +761,20 @@ def save_workspace(case, user, data):
         prop.property_usage_id = property_usage_id
         if area is not None:
             prop.area = area
-        if rooms is not None:
-            prop.rooms = rooms
-        if "floor" in data:
-            prop.floor = floor
-        if "built_year" in data:
-            prop.built_year = built_year
+        if not dynamic_attributes_supplied:
+            if rooms is not None:
+                prop.rooms = rooms
+            if "floor" in data:
+                prop.floor = floor
+            if "built_year" in data:
+                prop.built_year = built_year
         if "address" in data:
             prop.address = address
         if "district" in data:
             prop.district_id = district_id
+        if "latitude" in data or "longitude" in data:
+            prop.latitude = latitude
+            prop.longitude = longitude
         if "neighborhood" in data:
             prop.neighborhood = neighborhood
         if "description" in data:
@@ -634,6 +792,10 @@ def save_workspace(case, user, data):
         ):
             active_file.status = PropertyFile.Status.PAUSED
             active_file.save(update_fields=["status", "updated_at"])
+
+    if "attributes" in data:
+        _sync_property_attributes(prop, property_type_ref, data.get("attributes"))
+        _sync_legacy_property_feature_columns(prop)
 
     _sync_property_parties(prop, case, data, user)
 
@@ -667,6 +829,9 @@ def save_workspace(case, user, data):
 def submit_property_for_review(case, user, payload=None):
     from . import can_manage_sales_range, record_transition
 
+    case = models.PropertyRegistrationRequest.objects.select_for_update().select_related(
+        "resulting_property", "appraisal"
+    ).get(pk=case.pk)
     ensure_case_version(case, payload)
     allowed = (
         user_is_general_manager(user)
@@ -692,6 +857,11 @@ def submit_property_for_review(case, user, payload=None):
             errors["area"] = "متراژ ملک باید عددی مثبت باشد."
         if not prop.property_type and not prop.property_type_ref_id:
             errors["property_type"] = "انتخاب نوع ملک الزامی است."
+        elif prop.property_type_ref_id:
+            try:
+                _validate_required_property_attributes(prop)
+            except ValidationError as exc:
+                errors.update(getattr(exc, "message_dict", {"attributes": exc.messages}))
     if appraisal is None or not appraisal.is_complete or not str(appraisal.report_text or "").strip():
         errors["appraisal"] = "گزارش کارشناسی کامل ثبت نشده است."
     if errors:
@@ -728,7 +898,28 @@ def submit_property_for_review(case, user, payload=None):
         "built_year": prop.built_year,
         "property_type": prop.property_type,
         "property_type_ref_id": prop.property_type_ref_id,
+        "property_type_ref_name": prop.property_type_ref.name if prop.property_type_ref_id else None,
+        "property_type_display": prop.property_type_ref.display_name if prop.property_type_ref_id else prop.get_property_type_display(),
         "property_usage_id": prop.property_usage_id,
+        "property_usage_name": prop.property_usage.display_name if prop.property_usage_id else None,
+        "review_version": prop.review_version,
+        "submitted_review_version": prop.submitted_review_version,
+        "province_id": prop.district.city.province_id if prop.district_id and prop.district.city_id else None,
+        "province_name": prop.district.city.province.display_name if prop.district_id and prop.district.city_id else None,
+        "city_id": prop.district.city_id if prop.district_id else None,
+        "city_name": prop.district.city.display_name if prop.district_id and prop.district.city_id else None,
+        "location_path": prop.district.full_path if prop.district_id else None,
+        "latitude": str(prop.latitude) if prop.latitude is not None else None,
+        "longitude": str(prop.longitude) if prop.longitude is not None else None,
+        "attributes": _attribute_review_snapshot(prop),
+        "images": [
+            {
+                "id": image.pk,
+                "sort_order": image.sort_order,
+                "url": image.image.url if image.image else "",
+            }
+            for image in prop.images.order_by("sort_order", "id")
+        ],
     }
     review = models.PropertyReview.objects.create(
         property=prop,

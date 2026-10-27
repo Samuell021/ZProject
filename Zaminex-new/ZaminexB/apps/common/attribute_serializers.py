@@ -59,6 +59,14 @@ class AttributeValuesMixin:
             )
         return payload
 
+    def save_attribute_payload(self, instance, payload: dict):
+        """Persist validated-by-domain attribute values from a service workflow."""
+        if not isinstance(payload, dict):
+            raise serializers.ValidationError(
+                {"attributes": "قالب ویژگی‌ها نامعتبر است؛ یک شیء کلید/مقدار انتظار می‌رود."}
+            )
+        self._save_attribute_values(instance, payload)
+
     def _save_attribute_values(self, instance, payload: dict):
         from apps.basics.models import Attribute
 
